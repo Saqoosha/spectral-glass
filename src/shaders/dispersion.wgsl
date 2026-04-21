@@ -25,6 +25,10 @@ struct Frame {
   time:               f32,  // seconds since start (used for cube rotation)
   historyBlend:       f32,  // 0.2 steady state, 1.0 when the scene changed this frame
   heroLambda:         f32,  // jittered each frame in [380,700]; Hero mode uses this
+  cameraZ:            f32,  // distance from screen plane (z=0) to camera, in pixels
+  projection:         f32,  // 0 = orthographic, 1 = perspective
+  debugProxy:         f32,  // 1 = tint every proxy fragment pink (debug view)
+  _pad0:              f32,
   pills:              array<PillGpu, MAX_PILLS>,
 };
 
@@ -251,56 +255,88 @@ fn encodeDisplay(c: vec3<f32>) -> vec3<f32> {
 
 // ---------- proxy vertex shader ----------
 //
-// Draws a per-pill 2D screen-space quad instead of a fullscreen triangle.
-// Only pixels covered by the quad run the heavy refraction shader. Pixels
-// outside run only the cheap `fs_bg` in the preceding pass.
+// Draws a per-pill 3D bounding box (a unit cube scaled to halfSize+edgeR,
+// optionally rotated for shape==cube) instead of a fullscreen triangle. The
+// rasterizer produces fragments for the exact projected silhouette of the
+// proxy mesh, so tight coverage on rotated cubes is automatic.
 
-// 2 triangles = 6 vertices forming a unit quad in [-1, 1]^2.
-const QUAD_CORNERS: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
-  vec2<f32>(-1.0, -1.0), vec2<f32>( 1.0, -1.0), vec2<f32>(-1.0,  1.0),
-  vec2<f32>( 1.0, -1.0), vec2<f32>( 1.0,  1.0), vec2<f32>(-1.0,  1.0),
+// Unit cube, 36 verts, 12 tris, CCW outward winding (so `cullMode: 'back'`
+// leaves one invocation per covered pixel).
+const CUBE_VERTS: array<vec3<f32>, 36> = array<vec3<f32>, 36>(
+  // +X face (CCW outward: swap V1,V2 vs the other faces' pattern because the
+  // outward normal flips sign of cross(E1, E2) when the face is on the +X side)
+  vec3<f32>( 1.0,-1.0,-1.0), vec3<f32>( 1.0, 1.0, 1.0), vec3<f32>( 1.0,-1.0, 1.0),
+  vec3<f32>( 1.0,-1.0,-1.0), vec3<f32>( 1.0, 1.0,-1.0), vec3<f32>( 1.0, 1.0, 1.0),
+  // -X face
+  vec3<f32>(-1.0,-1.0,-1.0), vec3<f32>(-1.0,-1.0, 1.0), vec3<f32>(-1.0, 1.0, 1.0),
+  vec3<f32>(-1.0,-1.0,-1.0), vec3<f32>(-1.0, 1.0, 1.0), vec3<f32>(-1.0, 1.0,-1.0),
+  // +Y face
+  vec3<f32>(-1.0, 1.0,-1.0), vec3<f32>(-1.0, 1.0, 1.0), vec3<f32>( 1.0, 1.0, 1.0),
+  vec3<f32>(-1.0, 1.0,-1.0), vec3<f32>( 1.0, 1.0, 1.0), vec3<f32>( 1.0, 1.0,-1.0),
+  // -Y face
+  vec3<f32>(-1.0,-1.0,-1.0), vec3<f32>( 1.0,-1.0,-1.0), vec3<f32>( 1.0,-1.0, 1.0),
+  vec3<f32>(-1.0,-1.0,-1.0), vec3<f32>( 1.0,-1.0, 1.0), vec3<f32>(-1.0,-1.0, 1.0),
+  // +Z face
+  vec3<f32>(-1.0,-1.0, 1.0), vec3<f32>( 1.0,-1.0, 1.0), vec3<f32>( 1.0, 1.0, 1.0),
+  vec3<f32>(-1.0,-1.0, 1.0), vec3<f32>( 1.0, 1.0, 1.0), vec3<f32>(-1.0, 1.0, 1.0),
+  // -Z face
+  vec3<f32>(-1.0,-1.0,-1.0), vec3<f32>(-1.0, 1.0,-1.0), vec3<f32>( 1.0, 1.0,-1.0),
+  vec3<f32>(-1.0,-1.0,-1.0), vec3<f32>( 1.0, 1.0,-1.0), vec3<f32>( 1.0,-1.0,-1.0),
 );
 
-struct VsOutProxy {
-  @builtin(position) pos: vec4<f32>,
-  @location(0)       uv : vec2<f32>,
-};
+// Perspective projection: a world point `p` seen through a pinhole camera at
+// `(cx, cy, cz)` looking down -Z, with the z=0 plane mapping to the screen
+// exactly 1:1 in world pixels. A point at the screen plane projects to its own
+// (x, y). A point closer to the camera than z=0 projects outward; a point
+// beyond z=0 projects inward. Returns NDC (x in [-1,1], y in [-1,1] with DOM
+// top = +1) and a clip-W equal to depth-from-camera (positive for in-front).
+fn projectWorld(p: vec3<f32>) -> vec4<f32> {
+  let persp = frame.projection > 0.5;
+  let camXY = frame.resolution * 0.5;
+
+  var uv: vec2<f32>;
+  if (persp) {
+    let dz = frame.cameraZ - p.z;
+    // Bail out when the vertex is behind the camera — degenerate clip vector
+    // that fails the rasterizer's front-of-camera cull.
+    if (dz <= 1.0) {
+      return vec4<f32>(0.0, 0.0, 0.0, -1.0);
+    }
+    uv = (p.xy - camXY) * (frame.cameraZ / dz) + camXY;
+  } else {
+    uv = p.xy;
+  }
+  let ndcX = 2.0 * uv.x / frame.resolution.x - 1.0;
+  let ndcY = 1.0 - 2.0 * uv.y / frame.resolution.y;
+  return vec4<f32>(ndcX, ndcY, 0.5, 1.0);
+}
 
 @vertex
 fn vs_proxy(
   @builtin(vertex_index)   vi: u32,
   @builtin(instance_index) ii: u32,
-) -> VsOutProxy {
-  var out: VsOutProxy;
+) -> @builtin(position) vec4<f32> {
   if (ii >= u32(frame.pillCount)) {
-    // Degenerate instance (over pillCount) — push off-screen so fragment skips.
-    out.pos = vec4<f32>(2.0, 2.0, 0.5, 1.0);
-    out.uv  = vec2<f32>(0.0);
-    return out;
+    // Over pillCount → degenerate position so the triangle is clipped.
+    return vec4<f32>(2.0, 2.0, 0.5, 1.0);
   }
   let pill    = frame.pills[ii];
   let shapeId = i32(frame.shape + 0.5);
 
-  // Screen-space XY extent of the shape (tight enough to cover silhouette,
-  // loose enough to be simple). Pill / prism don't rotate so halfSize.xy is
-  // exact. Cube rotates — use the 3D-diagonal upper bound so any orientation
-  // stays covered.
-  var extent: vec2<f32>;
-  if (shapeId == 2) {
-    let m = max(pill.halfSize.x, max(pill.halfSize.y, pill.halfSize.z)) + pill.edgeR;
-    extent = vec2<f32>(m * 1.7321);  // √3 upper bound
-  } else {
-    extent = pill.halfSize.xy + vec2<f32>(pill.edgeR);
-  }
+  // Unit cube corner in [-1, 1]^3 → local box sized to the pill's halfSize
+  // (plus edgeR for the rounded rim so the proxy always fully covers the
+  // actual shape).
+  let extent  = pill.halfSize + vec3<f32>(pill.edgeR);
+  var corner  = CUBE_VERTS[vi] * extent;
 
-  let worldXY = pill.center.xy + QUAD_CORNERS[vi] * extent;
-  // World pixels (top-origin) → NDC. Flip Y because DOM is top-origin but NDC
-  // is bottom-origin.
-  let clipX = (worldXY.x / frame.resolution.x) * 2.0 - 1.0;
-  let clipY = 1.0 - (worldXY.y / frame.resolution.y) * 2.0;
-  out.pos = vec4<f32>(clipX, clipY, 0.5, 1.0);
-  out.uv  = worldXY / frame.resolution;
-  return out;
+  if (shapeId == 2) {
+    // The shader defines the cube via `local = rot * (p - center)`, so a
+    // world-space proxy corner that maps to the unit-cube local-space corner
+    // `c` is `center + transpose(rot) * (c * extent)`.
+    let rot = cubeRotation(frame.time);
+    corner  = transpose(rot) * corner;
+  }
+  return projectWorld(pill.center + corner);
 }
 
 // ---------- fragment ----------
@@ -314,7 +350,8 @@ struct FsOut {
 // no refraction, no per-wavelength loop. Runs for the whole screen; the proxy
 // pass then overrides covered pixels with the heavy shader's output.
 @fragment
-fn fs_bg(@location(0) uv: vec2<f32>) -> FsOut {
+fn fs_bg(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
+  let uv    = fragCoord.xy / frame.resolution;
   let bg    = textureSampleLevel(photoTex, photoSmp, coverUv(uv), 0.0).rgb;
   let prev  = textureSampleLevel(historyTex, historySmp, uv, 0.0).rgb;
   let blend = mix(prev, bg, frame.historyBlend);
@@ -325,18 +362,42 @@ fn fs_bg(@location(0) uv: vec2<f32>) -> FsOut {
 }
 
 @fragment
-fn fs_main(@location(0) uv: vec2<f32>) -> FsOut {
+fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
   // DOM-top-origin pixel coords so they match pointer events and defaultPills.
-  let px = vec2<f32>(uv.x * frame.resolution.x, uv.y * frame.resolution.y);
-  let ro = vec3<f32>(px, 400.0);
-  let rd = vec3<f32>(0.0, 0.0, -1.0);
-  let h  = sphereTrace(ro, rd, 800.0);
-  let bg = textureSampleLevel(photoTex, photoSmp, coverUv(uv), 0.0).rgb;
+  let px = fragCoord.xy;
+  let uv = px / frame.resolution;
+
+  // Ortho: parallel rays going -Z, origin just above the scene volume.
+  // Perspective: rays diverge from the camera through each screen pixel,
+  // hitting the z=0 screen plane exactly at (px.x, px.y, 0). FOV is encoded
+  // in cameraZ (smaller = wider FOV).
+  var ro: vec3<f32>;
+  var rd: vec3<f32>;
+  if (frame.projection > 0.5) {
+    ro = vec3<f32>(frame.resolution * 0.5, frame.cameraZ);
+    rd = normalize(vec3<f32>(px, 0.0) - ro);
+  } else {
+    ro = vec3<f32>(px, 400.0);
+    rd = vec3<f32>(0.0, 0.0, -1.0);
+  }
+  // One upper bound that works for both projections: a ray can't travel
+  // further than the camera-to-far-plane distance in the scene.
+  let maxT = 2.0 * max(frame.cameraZ, 400.0) + 400.0;
+  let h    = sphereTrace(ro, rd, maxT);
+  let bg   = textureSampleLevel(photoTex, photoSmp, coverUv(uv), 0.0).rgb;
 
   if (!h.ok) {
+    // Proxy covered this pixel but no cube surface was reached — pure waste
+    // (the proxy over-covers the shape). In debug mode, tint these MORE
+    // pinkly so the over-coverage "halo" around the cube silhouette is
+    // visible. In normal mode, fall through to the bg color.
+    var bgFinal = bg;
+    if (frame.debugProxy > 0.5) {
+      bgFinal = mix(bg, vec3<f32>(1.0, 0.3, 0.7), 0.5);
+    }
     var bgOut: FsOut;
-    bgOut.color   = vec4<f32>(encodeDisplay(bg), 1.0);
-    bgOut.history = vec4<f32>(bg, 1.0);  // history lives in linear space
+    bgOut.color   = vec4<f32>(encodeDisplay(bgFinal), 1.0);
+    bgOut.history = vec4<f32>(bgFinal, 1.0);
     return bgOut;
   }
 
@@ -438,7 +499,14 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FsOut {
   // host bumps it to 1.0 for one frame on any scene change (photo reload,
   // preset click, shape switch) so the previous scene doesn't ghost in.
   let prev  = textureSampleLevel(historyTex, historySmp, uv, 0.0).rgb;
-  let blend = mix(prev, outRgb, frame.historyBlend);
+  var blend = mix(prev, outRgb, frame.historyBlend);
+
+  // Debug: tint every proxy fragment pink so the proxy silhouette is visible.
+  // This path (ray hit the cube) gets a light tint; the miss path above gets
+  // a heavier tint so the over-coverage halo stands out.
+  if (frame.debugProxy > 0.5) {
+    blend = mix(blend, vec3<f32>(1.0, 0.3, 0.7), 0.2);
+  }
 
   var o: FsOut;
   o.color   = vec4<f32>(encodeDisplay(blend), 1.0);

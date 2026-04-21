@@ -12,6 +12,9 @@ export type Params = {
   refractionStrength: number;
   refractionMode: 'exact' | 'approx';
   temporalJitter: boolean;
+  projection: 'ortho' | 'perspective';
+  fov: number;  // full vertical field-of-view in degrees
+  debugProxy: boolean;  // tint proxy fragments pink
 };
 
 type Preset = {
@@ -145,6 +148,11 @@ export function initUi(
 
   const misc = pane.addFolder({ title: 'Misc' });
   misc.addBinding(params, 'refractionStrength', { min: 0, max: 1.0, step: 0.001, label: 'Refraction' });
+  misc.addBinding(params, 'projection', {
+    options: { Orthographic: 'ortho', Perspective: 'perspective' },
+  });
+  misc.addBinding(params, 'fov', { min: 20, max: 120, step: 1, label: 'FOV°' });
+  misc.addBinding(params, 'debugProxy', { label: 'Show proxy' });
 
   const presets = pane.addFolder({ title: 'Presets' });
   for (const preset of PRESETS) {
@@ -198,6 +206,9 @@ export function defaultParams(): Params {
     refractionStrength: 0.15,
     refractionMode: 'exact',
     temporalJitter: true,
+    projection: 'ortho',
+    fov: 60,
+    debugProxy: false,
   };
 }
 

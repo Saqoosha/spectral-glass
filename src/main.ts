@@ -169,6 +169,11 @@ async function main(): Promise<void> {
       // share it. Temporal history accumulates across hero choices, so the
       // single-trace geometry error averages out over ~5 frames.
       const heroLambda = 380 + Math.random() * 320;
+      // cameraZ sets the ortho depth AND implicitly the perspective FOV — for
+      // a full FOV of `fov` degrees to fit the canvas height, the camera must
+      // sit at `(height/2) / tan(fov/2)` pixels above the z=0 plane.
+      const fovRad  = params.fov * (Math.PI / 180);
+      const cameraZ = (height * 0.5) / Math.tan(fovRad * 0.5);
       writeFrame(ctx.device, frameBuf, {
         resolution:         [width, height],
         photoSize:          [photoNow.width, photoNow.height],
@@ -183,6 +188,9 @@ async function main(): Promise<void> {
         time:               timeSafe,
         historyBlend,
         heroLambda,
+        cameraZ,
+        projection:         params.projection === 'perspective' ? 1 : 0,
+        debugProxy:         params.debugProxy ? 1 : 0,
         pills,
       });
 

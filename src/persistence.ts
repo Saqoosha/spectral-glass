@@ -19,6 +19,7 @@ type Loaded = {
 // can't push invalid strings into the render pipeline.
 const SHAPES        = new Set<Params['shape']>(['pill', 'prism', 'cube']);
 const MODES         = new Set<Params['refractionMode']>(['exact', 'approx']);
+const PROJECTIONS   = new Set<Params['projection']>(['ortho', 'perspective']);
 const SAMPLE_COUNTS = new Set<Params['sampleCount']>([3, 8, 16, 32, 64]);
 
 function isFiniteNumber(v: unknown): v is number {
@@ -31,6 +32,8 @@ function validateParams(u: unknown): Partial<Params> {
   const out: Partial<Params> = {};
   if (typeof p.shape          === 'string' && SHAPES.has(p.shape as Params['shape']))                 out.shape          = p.shape as Params['shape'];
   if (typeof p.refractionMode === 'string' && MODES.has(p.refractionMode as Params['refractionMode'])) out.refractionMode = p.refractionMode as Params['refractionMode'];
+  if (typeof p.projection     === 'string' && PROJECTIONS.has(p.projection as Params['projection']))   out.projection     = p.projection as Params['projection'];
+  if (isFiniteNumber(p.fov))                out.fov                = p.fov;
   if (isFiniteNumber(p.sampleCount) && SAMPLE_COUNTS.has(p.sampleCount as Params['sampleCount']))      out.sampleCount    = p.sampleCount as Params['sampleCount'];
   if (isFiniteNumber(p.n_d))                out.n_d                = p.n_d;
   if (isFiniteNumber(p.V_d))                out.V_d                = p.V_d;
@@ -40,6 +43,7 @@ function validateParams(u: unknown): Partial<Params> {
   if (isFiniteNumber(p.edgeR))              out.edgeR              = p.edgeR;
   if (isFiniteNumber(p.refractionStrength)) out.refractionStrength = p.refractionStrength;
   if (typeof p.temporalJitter === 'boolean') out.temporalJitter    = p.temporalJitter;
+  if (typeof p.debugProxy === 'boolean')     out.debugProxy        = p.debugProxy;
   return out;
 }
 

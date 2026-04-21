@@ -72,7 +72,14 @@ export async function createPipeline(
     layout: pipelineLayout,
     vertex:   { module, entryPoint: 'vs_proxy' },
     fragment: { module, entryPoint: 'fs_main', targets },
-    primitive: { topology: 'triangle-list', cullMode: 'none' },
+    // `back` culling plus CCW-outward winding in CUBE_VERTS gives one fragment
+    // shader invocation per covered pixel. Without this, every pixel inside
+    // the rotated proxy would be shaded twice (front + back face).
+    // CCW-outward 3D winding projects to CW in NDC because our camera looks
+    // down -Z with NDC-up mapped to world-down (DOM top-origin). So front
+    // faces present CW in screen space; `frontFace: 'cw'` + `cullMode: 'back'`
+    // keeps exactly one fragment per covered pixel.
+    primitive: { topology: 'triangle-list', cullMode: 'back', frontFace: 'cw' },
   });
 
   return {
@@ -149,7 +156,7 @@ export function draw(
   // bg output for pixels inside the shape's silhouette.
   if (pillCount > 0) {
     pass.setPipeline(pl.proxy);
-    pass.draw(6, pillCount, 0, 0);
+    pass.draw(36, pillCount, 0, 0);  // 36 verts = 12 triangles per cube proxy
   }
   pass.end();
   if (onCommand) onCommand(encoder);
