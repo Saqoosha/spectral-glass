@@ -87,4 +87,10 @@ describe('cubeRotationColumns', () => {
     expect(m[7]).toBe(0);
     expect(m[11]).toBe(0);
   });
+
+  it('rejects non-finite time instead of producing NaN rotations', () => {
+    expect(() => cubeRotationColumns(NaN)).toThrow(/finite/);
+    expect(() => cubeRotationColumns(Infinity)).toThrow(/finite/);
+    expect(() => cubeRotationColumns(-Infinity)).toThrow(/finite/);
+  });
 });

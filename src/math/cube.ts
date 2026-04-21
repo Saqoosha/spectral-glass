@@ -11,6 +11,13 @@
  * the matrix's base offset.
  */
 export function cubeRotationColumns(time: number): Float32Array {
+  // NaN/±Infinity would poison the rotation matrix with NaN, which then slips
+  // into the GPU uniform and gets "healed" at the far end by the shader's
+  // degenerate-normal fallback — a silent visual corruption instead of a hard
+  // failure. Catch it here while the call site is still on the stack.
+  if (!Number.isFinite(time)) {
+    throw new Error(`cubeRotationColumns: time must be finite, got ${time}`);
+  }
   const ax = time * 0.31;
   const az = time * 0.20;
   const cx = Math.cos(ax);

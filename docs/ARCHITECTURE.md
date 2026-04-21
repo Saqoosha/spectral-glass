@@ -12,7 +12,7 @@ refraction shader only runs on fragments the proxy actually covers.
 │                                                                      │
 │  1. resize canvas + history if needed                                │
 │  2. push params → pills (hx/hy/hz/edgeR)                             │
-│  3. writeFrame → uniform buffer (336 B: scalars + MAX_PILLS × 32 B) │
+│  3. writeFrame → uniform buffer (384 B: scalars + mat3 + pills) │
 │  4. draw pass:                                                       │
 │     a. bg sub-pass: fullscreen triangle → fs_bg (photo + history)    │
 │     b. proxy sub-pass: instanced 3D cube mesh → fs_main              │
@@ -79,20 +79,25 @@ fragment shader's rays will trace.
 Mirrors the WGSL `Frame` struct exactly (std140-ish rules):
 
 ```
-offset  0  │ resolution.xy,  photoSize.xy                        (16 B)
-offset 16  │ n_d, V_d, sampleCount, refractionStrength           (16 B)
-offset 32  │ jitter, refractionMode, pillCount, applySrgbOetf    (16 B)
-offset 48  │ shape, time, historyBlend, heroLambda               (16 B)
-offset 64  │ cameraZ, projection, debugProxy, _pad               (16 B)
-offset 80  │ pills[0..8]   each pill is:                         (32 B each)
+offset   0 │ resolution.xy,  photoSize.xy                        (16 B)
+offset  16 │ n_d, V_d, sampleCount, refractionStrength           (16 B)
+offset  32 │ jitter, refractionMode, pillCount, applySrgbOetf    (16 B)
+offset  48 │ shape, time, historyBlend, heroLambda               (16 B)
+offset  64 │ cameraZ, projection, debugProxy, _pad0              (16 B)
+offset  80 │ cubeRot: mat3x3<f32>  (3 × 16 B padded columns)     (48 B)
+offset 128 │ pills[0..8]   each pill is:                         (32 B each)
            │   center.xyz, edgeR,   halfSize.xyz, _pad
 ```
 
-Total 336 bytes (80 B head + 8 × 32 B pills). Uniform size is fixed — pills
-beyond `pillCount` are zeros.
+Total 384 bytes (80 B head + 48 B cubeRot + 8 × 32 B pills). Uniform size is
+fixed — pills beyond `pillCount` are zeros.
 
 - `shape` selects the SDF (0=pill, 1=prism, 2=cube).
-- `time` drives cube rotation.
+- `time` is used by the GPU as the per-frame jitter hash seed; the host
+  separately derives `cubeRot` from the same value (see `src/math/cube.ts`).
+- `cubeRot` is the cube's rz·rx rotation, precomputed on the host once per
+  frame so the shader does one mat-vec instead of four cos/sin in every SDF
+  evaluation.
 - `historyBlend` is 0.2 in steady state and 1.0 for one frame after a scene
   change (preset click, photo reload, shape switch, pill shuffle) so stale
   temporal history doesn't ghost in.
@@ -136,18 +141,25 @@ Three shapes, all rounded (edgeR) extrusions. `sceneSdf` dispatches on the
   silhouette is a rectangle; the triangle's slanted YZ faces bend rays
   laterally, producing the classic prism rainbow at contrast edges in the
   photo.
-- **Cube** — standard rounded box. `local = rot * (p - center)` where `rot`
-  comes from `cubeRotation(frame.time)` (tumbles around X+Z at 0.31 + 0.20
-  rad/s). `cubeRotation` is called only inside the cube branch.
+- **Cube** — standard rounded box. `local = frame.cubeRot * (p - center)`.
+  `cubeRot` is the rz·rx rotation tumbling around X+Z at 0.31 + 0.20 rad/s,
+  computed on the host from `time` and uploaded as a uniform so every SDF
+  evaluation is just one mat-vec.
 
 Sphere trace starts from a per-pixel ray origin and direction (see Camera
-above), marches with `HIT_EPS = 0.25` and `MIN_STEP = 0.5`. Inside-trace uses
-`-sceneSdf` to find the back-surface exit; its distance cap is
-`maxInternalPath()` — the longest possible chord through any live pill —
-instead of a fixed 300, so thick shapes don't bail out mid-body.
+above), marches with `HIT_EPS = 0.25` and `MIN_STEP = 0.5`. For pill and
+prism, the back-surface exit comes from marching `-sceneSdf` (inside-trace),
+capped at `maxInternalPath()` — the longest possible chord through any live
+pill. **Cube** takes a shortcut: `cubeAnalyticExit` solves ray-box slab
+intersection in the cube's rotated local frame, which replaces the per-
+wavelength 48-iter inside-trace and 6-iter finite-diff normal with an O(1)
+closed-form exit point + rounded-box gradient normal. Roughly 7–8× faster
+for the cube case; pill/prism are unchanged.
 
-Normals come from central differences on the scene SDF — four extra SDF
-evaluations per shaded pixel, cheap.
+Normals come from central differences on the scene SDF for pill/prism — four
+extra SDF evaluations per shaded pixel, cheap. Cube uses the analytical
+rounded-box gradient at the exit point (same formula as the finite-diff
+would converge to), so the rounded rim keeps its soft refraction.
 
 ### Per-wavelength loop
 
@@ -158,7 +170,8 @@ for i in 0..N:
   ior    = cauchyIor(λ, n_d, V_d)
   r1     = refract(-z, nFront, 1/ior)
   if approx: (pExit, nBack) ← shared back-face trace at heroLambda
-  else:      pExit = insideTrace(h.p, r1, internalMax), nBack = -sceneNormal(pExit)
+  else if cube:  (pExit, nBack) ← cubeAnalyticExit(h.p, r1, cubeIdx)  // O(1) slab + rounded-box gradient
+  else:          pExit = insideTrace(h.p, r1, internalMax), nBack = -sceneNormal(pExit)
   r2     = refract(r1, nBack, ior)
   L      = TIR ? reflSrc : photo[uv_with_offset(r2)]
   F_λ    = schlickFresnel(cosT, ior)  // per-wavelength Fresnel
@@ -202,7 +215,7 @@ Apple Silicon.
 
 ## Testing
 
-Math modules are unit-tested (31 tests, all pass):
+Math modules are unit-tested (41 tests, all pass):
 
 - `cauchyIor` at d-line, monotonicity, `V_d` sensitivity, 1.0 clamp.
 - `cieXyz` Y-peak near 555 nm, red dominance at 650 nm, blue at 450 nm, near-zero at UV/IR.
@@ -211,6 +224,8 @@ Math modules are unit-tested (31 tests, all pass):
 - `sdfPill3d` sign, symmetry, top-face zero-crossing, rounded-edge smoothness.
 - `sdfPrism` interior sign, far-field positivity, apex/base edge values, both mirror symmetries, apex narrowing.
 - `sdfCube` interior, far-field, face zero-crossings, symmetry, rounded-corner smoothness.
+- `cameraZForFov` at 60°/90°, monotonicity with FOV, linearity with height, slider bounds.
+- `cubeRotationColumns` identity at t=0, orthonormality, matches the original rz·rx derivation, WGSL padded layout, pad slots zero, rejects non-finite time.
 
 WGSL versions are hand-mirrored by the corresponding TS module; the TS tests
 act as the reference. Shader correctness beyond that is verified visually —
@@ -218,18 +233,20 @@ no automated GPU tests.
 
 ## Performance
 
-Measured on Apple Silicon (Metal 3) at 1132×1046 (≈ 1.18 MP) via WebGPU
-`timestamp-query` (`?perf=1` URL flag exposes `window._perf.samples`):
+Measured on Apple Silicon (Metal 3) via WebGPU `timestamp-query` (`?perf=1`
+URL flag exposes `window._perf.samples`).
 
-| Config | GPU time | Budget % |
-|---|---:|---:|
-| pill N=8 | 1.40 ms | 8 % |
-| pill N=16 | 3.25 ms | 20 % |
-| pill N=32 | 6.70 ms | 40 % |
-| cube N=8 | 2.08 ms | 12 % |
-| cube N=16 | 6.22 ms | 37 % |
-| cube N=32 | 9.64 ms | 58 % |
-| cube N=64 | 11.49 ms | 69 % |
+After the analytical cube exit + host-side `cubeRot` uniform landed (≈ 800×760,
+4 rotating cubes):
+
+| Config | GPU time |
+|---|---:|
+| cube N=8  | 0.58 ms |
+| cube N=32 | 1.05 ms |
+
+That's ~7× faster at N=8 and ~8.5× faster at N=32 versus the earlier
+sphere-traced cube (4.01 ms and 8.97 ms respectively). Pill and prism use
+the same sphere-trace path as before — their timings are unchanged.
 
 All configurations hold 60 fps with zero dropped frames. On TBDR hardware
 (Apple M-series) background pixels are already efficiently culled; the proxy

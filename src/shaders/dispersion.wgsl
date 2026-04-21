@@ -22,16 +22,19 @@ struct Frame {
   pillCount:          f32,
   applySrgbOetf:      f32,  // 1.0 if canvas is non-sRGB and we must encode; 0.0 if -srgb
   shape:              f32,  // 0 = pill (stadium), 1 = prism, 2 = cube (rotates)
-  time:               f32,  // seconds since start (used for jitter hash seed)
+  time:               f32,  // seconds since start. GPU uses it for the jitter hash seed; the host derives `cubeRot` from the same value every frame.
   historyBlend:       f32,  // 0.2 steady state, 1.0 when the scene changed this frame
   heroLambda:         f32,  // jittered each frame in [380,700]; Hero mode uses this
   cameraZ:            f32,  // distance from screen plane (z=0) to camera, in pixels
   projection:         f32,  // 0 = orthographic, 1 = perspective
   debugProxy:         f32,  // 1 = tint every proxy fragment pink (debug view)
   _pad0:              f32,
-  // Cube rotation (rz·rx composed on the host from `time`). Uploaded as a
-  // uniform so every SDF evaluation just does one mat-vec instead of computing
-  // four cos/sin on the GPU — ~118 SDF calls per pixel in the worst case.
+  // Cube rotation (rz·rx composed on the host from `time` — see
+  // src/math/cube.ts). Uploaded as a uniform so every SDF evaluation is just
+  // one mat-vec instead of four cos/sin. With pillCount cubes in the scene the
+  // sphereTrace + inside-trace + normal path evaluates sdfCube up to
+  // (64 + 48 + 6) * pillCount ≈ 118 * pillCount times per pixel — that many
+  // cos/sin pairs saved per fragment per frame.
   cubeRot:            mat3x3<f32>,
   pills:              array<PillGpu, MAX_PILLS>,
 };
@@ -170,16 +173,24 @@ fn insideTrace(ro: vec3<f32>, rd: vec3<f32>, maxT: f32) -> vec3<f32> {
   return p;
 }
 
-// Which pill's center is closest to a world-space point? Used once per
-// fragment after the front hit to pick the pill whose analytical back-face
-// intersection we'll evaluate in the wavelength loop. Linear scan, capped at
-// MAX_PILLS=8 so it's cheap.
-fn nearestCubePillIdx(p: vec3<f32>) -> u32 {
+// Which cube pill does a world-space point belong to? Used once per fragment
+// after the front hit to pick the pill whose analytical back-face intersection
+// we'll evaluate in the wavelength loop.
+//
+// Uses per-pill rotated-cube SDF (same expression as sceneSdf's cube branch) so
+// the pill whose surface is actually closest to `p` wins. Picking by center
+// distance is wrong when pills overlap or have asymmetric sizes — a hit on
+// pill A's big face can be closer to pill B's center, which would then drive
+// `cubeAnalyticExit` with B's halfSize/edgeR/center and produce a bogus exit.
+// Linear scan, capped at MAX_PILLS=8 so it's cheap.
+fn hitCubePillIdx(p: vec3<f32>) -> u32 {
   let count = min(u32(frame.pillCount), MAX_PILLS);
   var best:  u32 = 0u;
   var bestD: f32 = 1e9;
   for (var i: u32 = 0u; i < count; i = i + 1u) {
-    let d = length(p - frame.pills[i].center);
+    let pill  = frame.pills[i];
+    let local = frame.cubeRot * (p - pill.center);
+    let d     = sdfCube(local, pill.halfSize, pill.edgeR);
     if (d < bestD) { bestD = d; best = i; }
   }
   return best;
@@ -189,9 +200,9 @@ fn nearestCubePillIdx(p: vec3<f32>) -> u32 {
 // starting inside the cube (typically the refracted direction at the front
 // hit), returns (pExit_world, nBack_world) where nBack faces INTO the glass —
 // matching the `-sceneNormal(pExit)` convention the caller passes to
-// `refract()`. Replaces a 48-iter sphere-trace + 6-iter finite-diff normal
-// with ~30 ALU ops, and it's invoked once per wavelength so the savings
-// multiply by N.
+// `refract()`. Replaces the per-wavelength `insideTrace` (up to 48 SDF evals)
+// plus `sceneNormal` (6 SDF evals for finite-diff gradient) with one slab
+// intersection, so the savings multiply by N in Exact mode.
 //
 // Uses ray-box slab intersection in the cube's local (rotated) frame:
 //   `pExit_local = roL + rdL * tExit`, where tExit is the smallest t at which
@@ -202,9 +213,11 @@ fn nearestCubePillIdx(p: vec3<f32>) -> u32 {
 // did, so the rounded rim keeps its soft refraction.
 //
 // Caveat: for rays exiting through a rounded rim, intersecting the outer slab
-// slightly overshoots the true rounded surface (by ≤ edgeR). At edgeR=10 on a
-// 160-wide cube this is <6% of the rim band and invisible in the final image
-// after temporal accumulation.
+// slightly overshoots the true rounded surface by up to edgeR along the
+// exit-axis component. At edgeR=10 on a cube of half-size 80 (full width 160)
+// that is ≤ edgeR/halfSize ≈ 12.5% of the rim band's width but only
+// edgeR/fullWidth ≈ 6% of the cube itself, and invisible after temporal
+// history accumulation for the presets we ship.
 struct CubeExit {
   pWorld: vec3<f32>,
   nBack:  vec3<f32>,  // inward-facing (into the glass), same sign convention as -sceneNormal
@@ -219,26 +232,34 @@ fn cubeAnalyticExit(roWorld: vec3<f32>, rdWorld: vec3<f32>, pillIdx: u32) -> Cub
   let roL = frame.cubeRot * (roWorld - pill.center);
   let rdL = frame.cubeRot * rdWorld;
 
-  // Slab intersection per axis. A zero component in rdL gives ±inf which the
-  // `max` naturally rejects (ro is inside the cube, so that axis' slab already
-  // contains us and can't be the first exit).
+  // Slab intersection per axis. A zero component in rdL gives ±inf which
+  // `max` naturally rejects: ro is inside the cube so `h - roL > 0` and
+  // `-h - roL < 0`, and inf carries the rejection across `max`. The tricky
+  // case `(h - roL) == 0` with `rdL == 0` would give 0/0 = NaN, but that
+  // requires ro exactly on the slab boundary AND a ray parallel to it — not
+  // reachable from a refracted ray starting strictly inside.
   let rdInv = vec3<f32>(1.0) / rdL;
   let tHi   = (h - roL) * rdInv;
   let tLo   = (-h - roL) * rdInv;
   let tExitAxis = max(tHi, tLo);
 
-  // First slab crossing on the way out wins.
+  // First slab crossing on the way out wins. `faceDir` is +1 if we exit the
+  // positive slab and -1 if we exit the negative one — derived from tHi vs tLo
+  // (not `sign(rdL)`, which is 0 for rdL == 0 and would zero the normal).
   var tExit: f32;
   var faceAxisN: vec3<f32>;
   if (tExitAxis.x <= tExitAxis.y && tExitAxis.x <= tExitAxis.z) {
     tExit = tExitAxis.x;
-    faceAxisN = vec3<f32>(sign(rdL.x), 0.0, 0.0);
+    let faceDir = select(-1.0, 1.0, tHi.x >= tLo.x);
+    faceAxisN = vec3<f32>(faceDir, 0.0, 0.0);
   } else if (tExitAxis.y <= tExitAxis.z) {
     tExit = tExitAxis.y;
-    faceAxisN = vec3<f32>(0.0, sign(rdL.y), 0.0);
+    let faceDir = select(-1.0, 1.0, tHi.y >= tLo.y);
+    faceAxisN = vec3<f32>(0.0, faceDir, 0.0);
   } else {
     tExit = tExitAxis.z;
-    faceAxisN = vec3<f32>(0.0, 0.0, sign(rdL.z));
+    let faceDir = select(-1.0, 1.0, tHi.z >= tLo.z);
+    faceAxisN = vec3<f32>(0.0, 0.0, faceDir);
   }
 
   let pL = roL + rdL * tExit;
@@ -500,9 +521,10 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
   let internalMax = maxInternalPath();
 
   // Pill the front hit belongs to. Only used for the analytical cube path —
-  // pill/prism keep sphere-tracing the whole scene, which works even when two
-  // pills overlap.
-  let cubeIdx = nearestCubePillIdx(h.p);
+  // pill/prism keep sphere-tracing the whole scene. Picked by per-pill SDF
+  // minimum at the hit point so overlapping cubes still resolve correctly.
+  // Cheap enough (≤8 pills) that we leave it unconditional here.
+  let cubeIdx = hitCubePillIdx(h.p);
 
   // Hero mode: one back-face trace at a PER-FRAME-RANDOMIZED wavelength
   // (Wilkie 2014). Unlike plain "approx" fixed at 540 nm, the randomization +

@@ -14,7 +14,7 @@ export type FrameParams = {
   readonly refractionMode:     number;
   readonly applySrgbOetf:      boolean;
   readonly shape:              number;  // 0 = pill, 1 = prism, 2 = cube
-  readonly time:               number;  // seconds since start (used for cube rotation)
+  readonly time:               number;  // seconds since start. Host derives the cube rotation from this; the GPU also sees it raw for the jitter hash seed.
   readonly historyBlend:       number;  // 0..1 — 0.2 steady-state, 1.0 on scene-change frames to clear stale history
   readonly heroLambda:         number;  // [380, 700] — jittered each frame; drives hero-wavelength back-face trace
   readonly cameraZ:            number;  // distance from screen plane (z=0) to the camera, in pixels
