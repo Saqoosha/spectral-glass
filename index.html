@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Real Refraction</title>
+    <style>
+      html, body { margin: 0; padding: 0; background: #000; color: #fff; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+      canvas { display: block; width: 100vw; height: 100vh; }
+      #fallback { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; text-align: center; padding: 2rem; font-size: 1.1rem; line-height: 1.6; }
+      #fallback.visible { display: flex; }
+    </style>
+  </head>
+  <body>
+    <canvas id="gpu"></canvas>
+    <div id="fallback">
+      This demo needs a WebGPU-capable browser.<br />
+      Try Chrome/Edge 120+ on macOS/Windows/Linux, or Safari 18+ on macOS/iOS.
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
