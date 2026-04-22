@@ -44,6 +44,14 @@ export const PILL_SHORT_MAX = 200;
 export const PILL_THICK_MIN = 10;
 export const PILL_THICK_MAX = 200;
 
+/** History EMA blend weight bounds. Lower bound 0.05 keeps some smoothing —
+ *  going below it makes the wavelength stratification noise visibly flicker
+ *  per pixel because each frame's stratum lottery isn't averaged with prior
+ *  frames at all. Upper bound 1.0 means "throw away history every frame"
+ *  (instant updates, no temporal anything). */
+export const HISTORY_ALPHA_MIN = 0.05;
+export const HISTORY_ALPHA_MAX = 1.0;
+
 export type Params = {
   sampleCount: 3 | 8 | 16 | 32 | 64;
   shape: 'pill' | 'prism' | 'cube' | 'plate';
@@ -61,6 +69,7 @@ export type Params = {
   debugProxy: boolean;  // tint proxy fragments pink
   taa: boolean;  // sub-pixel jitter + history EMA antialiasing
   paused: boolean;  // "Stop the world" — freeze rotation/wave while keeping AA converging
+  historyAlpha: number;  // steady-state EMA blend weight (0..1). Lower = more motion blur, less noise; higher = sharper but noisier.
   // Plate-only wave controls. Amp in pixels (midsurface z-displacement);
   // wavelength in pixels (converted to angular frequency 2π/wavelength on
   // the GPU side via the waveFreq uniform). Exposed as length so the UI
@@ -298,6 +307,15 @@ export function initUi(
   misc.addBinding(params, 'fov', { min: FOV_MIN, max: FOV_MAX, step: 1, label: 'FOV°' });
   misc.addBinding(params, 'paused', { label: 'Stop the world' });
   misc.addBinding(params, 'taa', { label: 'TAA' });
+  // History blend weight controls the steady-state EMA. Higher = sharper
+  // motion (less ghost) but noisier. The shader auto-adapts toward 1.0
+  // when it detects color jumps (variance clamp), so for fast motion the
+  // effective alpha is bumped automatically — this slider just sets the
+  // baseline for static / slow-motion frames.
+  misc.addBinding(params, 'historyAlpha', {
+    min: HISTORY_ALPHA_MIN, max: HISTORY_ALPHA_MAX, step: 0.01,
+    label: 'History α',
+  });
   misc.addBinding(params, 'debugProxy', { label: 'Show proxy' });
 
   const presets = pane.addFolder({ title: 'Presets' });
@@ -406,6 +424,7 @@ export function defaultParams(): Params {
     debugProxy: false,
     taa: true,
     paused: false,
+    historyAlpha: 0.2,
     waveAmp: 20,
     waveWavelength: 300,
   };

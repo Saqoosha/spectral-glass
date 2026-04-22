@@ -1033,7 +1033,28 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
     historyUv = reprojectHit(h.p, px, analyticIdx, shapeId, uv);
   }
   let prev  = textureSampleLevel(historyTex, historySmp, historyUv, 0.0).rgb;
-  var blend = mix(prev, outRgb, frame.historyBlend);
+
+  // Adaptive variance clamp — Karis 2014 in spirit, single-tap variant.
+  // Refractive shapes (cube, plate) change view-dependent color frame-to-
+  // frame even when motion-vector reprojection lands on the right pixel
+  // (the surface point is the same but the refracted UV moves with the
+  // surface normal). Pure EMA blending of these wildly-changing samples
+  // produces visible ghost trails on rotating plates.
+  //
+  // Rule: if the new sample disagrees with history (large `diff`), bias
+  // the effective alpha toward 1.0 so the new sample dominates. For
+  // small diffs (steady-state noise floor) keep the user's chosen alpha
+  // so wavelength stratification still gets averaged out.
+  //
+  // Gated on `historyBlend > ~0.1` so paused-scene progressive averaging
+  // (`α = max(1/n, 1/256)` → 0) isn't wrecked: with a tiny historyBlend
+  // we WANT to fold in the new sample at exactly that weight, not a
+  // motion-bumped weight.
+  let diff       = length(outRgb - prev);
+  let clampGate  = smoothstep(0.05, 0.15, frame.historyBlend);
+  let clampMix   = clampGate * smoothstep(0.05, 0.30, diff);
+  let effectiveA = mix(frame.historyBlend, 1.0, clampMix);
+  var blend      = mix(prev, outRgb, effectiveA);
 
   // Debug: tint every proxy fragment pink so the proxy silhouette is visible.
   // This path (ray hit the cube) gets a light tint; the miss path above gets

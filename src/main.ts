@@ -272,7 +272,7 @@ async function main(): Promise<void> {
       }
       const steadyBlend  = params.paused
         ? Math.max(1.0 / pausedFrames, 1.0 / 256)
-        : 0.2;
+        : params.historyAlpha;
       const historyBlend = resetHistoryFrames > 0 ? 1.0 : steadyBlend;
       if (resetHistoryFrames > 0) resetHistoryFrames -= 1;
 

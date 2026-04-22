@@ -1,5 +1,6 @@
 import {
   EDGE_R_MAX, EDGE_R_MIN, FOV_MAX, FOV_MIN,
+  HISTORY_ALPHA_MAX, HISTORY_ALPHA_MIN,
   PILL_LEN_MAX, PILL_LEN_MIN, PILL_SHORT_MAX, PILL_SHORT_MIN,
   PILL_THICK_MAX, PILL_THICK_MIN,
   WAVE_AMP_MAX, WAVE_AMP_MIN, WAVE_WAVELENGTH_MAX, WAVE_WAVELENGTH_MIN,
@@ -56,6 +57,7 @@ function validateParams(u: unknown): Partial<Params> {
   if (typeof p.debugProxy === 'boolean')     out.debugProxy        = p.debugProxy;
   if (typeof p.taa === 'boolean')            out.taa               = p.taa;
   if (typeof p.paused === 'boolean')         out.paused            = p.paused;
+  if (isFiniteNumber(p.historyAlpha))        out.historyAlpha      = clamp(p.historyAlpha, HISTORY_ALPHA_MIN, HISTORY_ALPHA_MAX);
   // Plate wave controls. Clamp to UI slider bounds so hand-edited storage
   // can't push `(amp·freq)²` arbitrarily large — at the slider extremes
   // (amp=60, wavelength=60) waveLipFactor still bottoms out at ≈ 0.16
