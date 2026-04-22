@@ -273,10 +273,18 @@ export function initUi(
   // checkbox toggle) — use those as scene-change triggers so the history clears
   // when geometry jumps. Mid-drag slider ticks (last: false) keep their
   // temporal smoothing.
-  pane.on('change', (ev) => {
+  //
+  // We subscribe per-folder (skipping Perf) instead of the whole pane because
+  // tweakpane's readonly graph bindings emit a `change` event on every poll —
+  // a global `pane.on('change')` handler would call markSceneChanged 4 times
+  // a second and visibly clobber the temporal accumulation on the cube.
+  const onUserChange = (ev: { last: boolean }) => {
     if (ev.last) markSceneChanged();
     onChange();
-  });
+  };
+  spectral.on('change',  onUserChange);
+  shape.on('change',     onUserChange);
+  misc.on('change',      onUserChange);
 
   return pane;
 }
