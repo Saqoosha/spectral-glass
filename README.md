@@ -62,7 +62,7 @@ Requires a WebGPU-capable browser (Chrome / Edge 120+, Safari 18+).
 | **`Z`** (hold) | Force `N = 3` (fake RGB dispersion) for A/B comparison |
 | **Space** | Shuffle pills to random positions |
 | **`R`** | Reload a new random Picsum photo |
-| Tweakpane | IOR, Abbe, sample count, shape (pill / prism / cube / plate), dimensions, wave amp + wavelength (plate only), refraction strength, projection (ortho / perspective), FOV, temporal jitter, refraction mode |
+| Tweakpane | IOR, Abbe, sample count, shape (pill / prism / cube / plate), dimensions, wave amp + wavelength (plate only), refraction strength, projection (ortho / perspective), FOV, temporal jitter, refraction mode, **Stop the world** (freeze rotation/wave while AA keeps converging), **TAA** (sub-pixel jitter + motion-vector history reprojection) |
 | Presets | Subtle pill · Strong dispersion · Prism rainbow · Rotating cube · Wavy plate |
 | Materials | 10 real-world glasses (water → BK7 → SF flints → diamond → moissanite) + 4 fantasy (n_d up to 3.5, V_d down to 2) |
 
@@ -113,7 +113,19 @@ every proxy fragment pink and see the rasterised silhouette.
   black holes inside the cube.
 - **Temporal accumulation.** `rgba16float` ping-pong history with EMA blend
   (α = 0.2 steady-state, 1.0 for one frame after a scene change so cube
-  tail doesn't ghost in).
+  tail doesn't ghost in). When **Stop the world** freezes the scene, the
+  blend switches to progressive averaging (α = 1/n) so noise drops as 1/√n
+  toward zero — paused scenes converge to a noise-free image.
+- **Temporal AA with motion-vector reprojection.** Each frame's primary
+  ray is sub-pixel-jittered by a per-pixel hash; history is read at
+  `fragCoord + (projected_prev_world − projected_curr_world)` so the
+  jitter cancels and only the rotation-driven world motion shifts the
+  read. Stationary scenes read history at exactly the pixel centre — no
+  iterated bilinear blur — while tumbling cubes and plates keep their
+  refracted texture sharp under motion. The host pre-computes both the
+  current and previous frame's `cubeRot` / `plateRot` and uploads them as
+  uniforms; cube and plate get analytic-exit reprojection, pill / prism
+  fall back to the unreprojected read.
 - **sRGB OETF** applied manually when the swapchain format is non-sRGB.
 - **localStorage persistence.** Validated load (rejects NaN / bogus enums),
   trailing-edge debounced save, pagehide flush.

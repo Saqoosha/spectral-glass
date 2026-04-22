@@ -28,7 +28,7 @@ struct Frame {
   cameraZ:            f32,  // distance from screen plane (z=0) to camera, in pixels
   projection:         f32,  // 0 = orthographic, 1 = perspective
   debugProxy:         f32,  // 1 = tint every proxy fragment pink (debug view)
-  _pad0:              f32,
+  taaEnabled:         f32,  // 1 = jitter ray origin within the pixel so history EMA antialiases shader-decided silhouettes
   // Cube rotation (rz·rx composed on the host from `time` — see
   // src/math/cube.ts). Uploaded as a uniform so every cube SDF evaluation is
   // just one mat-vec instead of four cos/sin. With cubeAnalyticExit replacing
@@ -41,18 +41,32 @@ struct Frame {
   // multiplies, one transpose, two inverse multiplies — all from the same
   // uniform, no extra cos/sin).
   cubeRot:            mat3x3<f32>,
+  // Previous frame's cube rotation. Together with the current `cubeRot` this
+  // lets the TAA reprojection path recover the screen position of the hit
+  // point one frame ago, so the history read follows the rotating cube's
+  // surface instead of smearing stale neighboring pixels into it.
+  cubeRotPrev:        mat3x3<f32>,
   // Plate rotation (rx·ry composed on the host from `time` — see
   // src/math/plate.ts). Used by sdfWavyPlate for both SDF evaluation and by
   // vs_proxy to rotate the proxy bounding box so it stays tight (cube-style).
   plateRot:           mat3x3<f32>,
+  // Previous frame's plate rotation. Analogous to cubeRotPrev above — feeds
+  // the TAA reprojection path so tumbling plates also keep sharp refracted
+  // texture instead of ghosting.
+  plateRotPrev:       mat3x3<f32>,
   // Plate wave parameters. `waveLipFactor` is the precomputed safety factor
   // 1/sqrt(1 + 2·(amp·freq)²) applied inside sdfWavyPlate so the raw
   // (box - wave) value is a valid Lipschitz bound — host-side computation
-  // avoids an `inverseSqrt` on every SDF eval. Trailing slot is padding.
+  // avoids an `inverseSqrt` on every SDF eval.
+  //
+  // `sceneTime` is the time value for scene motion (rotation + wave phase).
+  // It freezes when the user hits "Stop the world" while the noise-seeding
+  // `time` field above keeps advancing — so TAA sub-pixel jitter keeps
+  // accumulating and AA quality continues to improve on paused scenes.
   waveAmp:            f32,
   waveFreq:           f32,
   waveLipFactor:      f32,
-  _padWave1:          f32,
+  sceneTime:          f32,
   pills:              array<PillGpu, MAX_PILLS>,
 };
 
@@ -134,17 +148,20 @@ fn sdfPrism(p: vec3<f32>, halfSize: vec3<f32>, edgeR: f32) -> f32 {
 // the current wave parameters allow (~0.86 at defaults, previously a
 // conservative hardcoded 0.6 — ≈45% fewer sphereTrace steps at the same
 // safety margin).
-fn sdfWavyPlate(pIn: vec3<f32>, halfSize: vec3<f32>, t: f32) -> f32 {
+fn sdfWavyPlate(pIn: vec3<f32>, halfSize: vec3<f32>) -> f32 {
   let p = frame.plateRot * pIn;
 
   // Force square XY face (halfSize.y ignored — UI hides pillShort for plate).
   let h = vec3<f32>(halfSize.x, halfSize.x, halfSize.z);
 
-  // Midsurface z-displacement. Animated via phase-shift on t so the plate
-  // "pulses" independently of its tumble; 2t reads faster than the 0.2–0.3
-  // rad/s tumble so both motions are visible at once.
+  // Midsurface z-displacement. Animated via phase-shift on scene time so the
+  // plate "pulses" independently of its tumble; 2·sceneTime reads faster
+  // than the 0.2–0.3 rad/s tumble so both motions are visible at once.
+  // Scene time is used (not the caller's `t`) so pause/unpause freezes the
+  // wave in sync with the rotation.
   let k     = frame.waveFreq;
-  let waveZ = frame.waveAmp * sin(k * p.x + t * 2.0) * sin(k * p.y + t * 2.0);
+  let st    = frame.sceneTime;
+  let waveZ = frame.waveAmp * sin(k * p.x + st * 2.0) * sin(k * p.y + st * 2.0);
 
   // Slab centered on the wavy midsurface. Both faces ride `waveZ` together,
   // giving a constant-thickness bent sheet instead of a bulge/pinch volume.
@@ -171,9 +188,10 @@ fn sceneSdf(p: vec3<f32>) -> f32 {
     } else if (shapeId == 1) {
       pd = sdfPrism(local, pill.halfSize, pill.edgeR);
     } else if (shapeId == 3) {
-      // Plate: wave amp + freq come from global uniforms (frame.waveAmp /
-      // frame.waveFreq), pill.edgeR is ignored for this shape.
-      pd = sdfWavyPlate(local, pill.halfSize, frame.time);
+      // Plate: wave amp + freq + time come from global uniforms
+      // (frame.waveAmp / frame.waveFreq / frame.sceneTime), pill.edgeR is
+      // ignored for this shape.
+      pd = sdfWavyPlate(local, pill.halfSize);
     } else {
       pd = sdfPill(local, pill.halfSize, pill.edgeR);
     }
@@ -396,7 +414,7 @@ fn hitPlatePillIdx(p: vec3<f32>) -> u32 {
   for (var i: u32 = 0u; i < count; i = i + 1u) {
     let pill  = frame.pills[i];
     let local = p - pill.center;
-    let d     = abs(sdfWavyPlate(local, pill.halfSize, frame.time));
+    let d     = abs(sdfWavyPlate(local, pill.halfSize));
     if (d < bestD) { bestD = d; best = i; }
   }
   return best;
@@ -463,10 +481,12 @@ fn plateAnalyticExit(roWorld: vec3<f32>, rdWorld: vec3<f32>, pillIdx: u32) -> Cu
     nOutL = vec3<f32>(0.0, faceSign, 0.0);
   } else {
     // Z face: Newton-refine against the wavy surface. f(t) = pL.z − z*(pL.xy),
-    // where z*(x, y) = faceSign·halfZ + amp·sin(kx+φ)·sin(ky+φ).
+    // where z*(x, y) = faceSign·halfZ + amp·sin(kx+φ)·sin(ky+φ). Phase is
+    // driven by scene time so it freezes with "Stop the world" instead of
+    // drifting past the frozen rotation.
     let k     = frame.waveFreq;
     let amp   = frame.waveAmp;
-    let phase = frame.time * 2.0;
+    let phase = frame.sceneTime * 2.0;
     for (var i: i32 = 0; i < 3; i = i + 1) {
       let sx = sin(k * pL.x + phase);
       let sy = sin(k * pL.y + phase);
@@ -629,6 +649,79 @@ fn projectWorld(p: vec3<f32>) -> vec4<f32> {
   return vec4<f32>(ndcX, ndcY, 0.5, 1.0);
 }
 
+// Project a world point to screen-space pixel coordinates using the same
+// pinhole model as projectWorld() but returning pixel units directly (no NDC
+// flip). The z component carries a validity flag: > 0 = in front of camera,
+// <= 0 = behind / at camera. Used by reprojectHit() below — the NDC return
+// shape of projectWorld is awkward for "did this reprojection land inside
+// the history texture?" checks.
+fn worldToScreenPx(p: vec3<f32>) -> vec3<f32> {
+  let camXY = frame.resolution * 0.5;
+  if (frame.projection > 0.5) {
+    let dz = frame.cameraZ - p.z;
+    if (dz <= 0.0) {
+      return vec3<f32>(0.0, 0.0, -1.0);
+    }
+    let px = (p.xy - camXY) * (frame.cameraZ / dz) + camXY;
+    return vec3<f32>(px.x, px.y, 1.0);
+  }
+  return vec3<f32>(p.x, p.y, 1.0);
+}
+
+// TAA motion-vector reprojection. Given a world-space hit point on a rotating
+// shape AND the unjittered fragment coordinate it came from, returns the
+// screen UV where that SAME point on the shape was one frame ago — so the
+// history read tracks the rotating surface instead of smearing stale
+// neighbouring pixels into the output.
+//
+// Cube / plate both cache their previous rotation as a uniform (`cubeRotPrev`
+// / `plateRotPrev`), so the math is: world → local (current rotation) → world
+// (previous rotation) → screen. pill / prism don't rotate, so their hit
+// point's prev screen position is just the current one — the caller passes
+// in `fallbackUv` and we return it untouched (modulo the out-of-bounds check
+// below, which catches disocclusion at the screen edge).
+//
+// Critical detail: `hitWorld` came from a JITTERED ray, so its raw screen
+// projection isn't pixel-aligned. Using `projection(prevWorld) / resolution`
+// directly would shift the history read by a fresh sub-pixel offset every
+// frame, and bilinear filtering would compound a fractional-pixel blur into
+// the history with each accumulation step (visible as "super blurry plates"
+// when long-pause progressive averaging drives α toward 0).
+//
+// The fix below is the standard TAA technique: compute the motion DELTA in
+// screen pixels (jitter cancels because it's present in both the current and
+// previous projections) and add it to the unjittered FRAGCOORD. Static scenes
+// then read history at exactly the pixel centre — no bilinear blur — and
+// moving scenes still get the correct motion-corrected sample.
+fn reprojectHit(hitWorld: vec3<f32>, fragCoord: vec2<f32>, pillIdx: u32, shapeId: i32, fallbackUv: vec2<f32>) -> vec2<f32> {
+  var prevWorld = hitWorld;
+  if (shapeId == 2) {
+    let pill  = frame.pills[pillIdx];
+    let local = frame.cubeRot * (hitWorld - pill.center);
+    prevWorld = transpose(frame.cubeRotPrev) * local + pill.center;
+  } else if (shapeId == 3) {
+    let pill  = frame.pills[pillIdx];
+    let local = frame.plateRot * (hitWorld - pill.center);
+    prevWorld = transpose(frame.plateRotPrev) * local + pill.center;
+  }
+
+  let prevPx = worldToScreenPx(prevWorld);
+  let currPx = worldToScreenPx(hitWorld);
+  if (prevPx.z <= 0.0 || currPx.z <= 0.0) { return fallbackUv; }
+
+  // Jitter cancels here because both projections used the same jittered
+  // hitWorld; the delta is pure world-motion screen-space displacement.
+  let motionPx = prevPx.xy - currPx.xy;
+  let prevUv   = (fragCoord + motionPx) / frame.resolution;
+  // Disocclusion: the point was outside the screen a frame ago, so there's
+  // no meaningful history for it. Fall back to the unreprojected read and
+  // let EMA fade in fresh data over the next ~5 frames.
+  if (any(prevUv < vec2<f32>(0.0)) || any(prevUv > vec2<f32>(1.0))) {
+    return fallbackUv;
+  }
+  return prevUv;
+}
+
 @vertex
 fn vs_proxy(
   @builtin(vertex_index)   vi: u32,
@@ -695,17 +788,36 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
   let px = fragCoord.xy;
   let uv = px / frame.resolution;
 
+  // Temporal antialiasing: jitter the ray's sub-pixel position by a
+  // per-frame-decorrelated vector in [-0.5, 0.5)², and let the history EMA
+  // average the shifted samples. The fragment still writes to the
+  // unjittered fragCoord, so history reads/writes use `uv` as-is — only
+  // ray generation and sampling-along-the-ray see the jittered position.
+  // Handles the shape silhouette (decided inside this shader by
+  // sphere-trace hit/miss, which MSAA can't touch) AND smooths any
+  // wave/refraction texture aliasing for free. Steady-state α = 0.2 =>
+  // full convergence in ~5 frames; imperceptible ghost for slow tumble,
+  // only noticeable on fast drags.
+  var rayPx = px;
+  if (frame.taaEnabled > 0.5) {
+    let taaJit = vec2<f32>(
+      hash21(px + vec2<f32>(frame.time * 7.19, 3.141)) - 0.5,
+      hash21(px + vec2<f32>(frame.time * 11.23, 6.283)) - 0.5,
+    );
+    rayPx = px + taaJit;
+  }
+
   // Ortho: parallel rays going -Z, origin just above the scene volume.
   // Perspective: rays diverge from the camera through each screen pixel,
-  // hitting the z=0 screen plane exactly at (px.x, px.y, 0). FOV is encoded
-  // in cameraZ (smaller = wider FOV).
+  // hitting the z=0 screen plane exactly at (rayPx.x, rayPx.y, 0). FOV is
+  // encoded in cameraZ (smaller = wider FOV).
   var ro: vec3<f32>;
   var rd: vec3<f32>;
   if (frame.projection > 0.5) {
     ro = vec3<f32>(frame.resolution * 0.5, frame.cameraZ);
-    rd = normalize(vec3<f32>(px, 0.0) - ro);
+    rd = normalize(vec3<f32>(rayPx, 0.0) - ro);
   } else {
-    ro = vec3<f32>(px, 400.0);
+    ro = vec3<f32>(rayPx, 400.0);
     rd = vec3<f32>(0.0, 0.0, -1.0);
   }
   // One upper bound that works for both projections: a ray can't travel
@@ -887,7 +999,20 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
   // for display only on the swapchain write. `historyBlend` is normally 0.2 —
   // host bumps it to 1.0 for one frame on any scene change (photo reload,
   // preset click, shape switch) so the previous scene doesn't ghost in.
-  let prev  = textureSampleLevel(historyTex, historySmp, uv, 0.0).rgb;
+  //
+  // TAA motion-vector reprojection: for rotating shapes (cube / plate), read
+  // history at the screen location where the hit point was one frame ago.
+  // This is what turns naive TAA (which blurs tumbling refraction texture
+  // into mush) into real TAA that keeps refracted detail sharp under motion.
+  // Pill / prism pass through unchanged (reprojectHit returns fallbackUv for
+  // non-rotating shapes, and we short-circuit when TAA is off).
+  var historyUv = uv;
+  if (frame.taaEnabled > 0.5 && hasAnalyticExit) {
+    // Pass the unjittered `px` so the reprojection cancels jitter in the
+    // motion delta, keeping static-scene history reads pixel-aligned.
+    historyUv = reprojectHit(h.p, px, analyticIdx, shapeId, uv);
+  }
+  let prev  = textureSampleLevel(historyTex, historySmp, historyUv, 0.0).rgb;
   var blend = mix(prev, outRgb, frame.historyBlend);
 
   // Debug: tint every proxy fragment pink so the proxy silhouette is visible.

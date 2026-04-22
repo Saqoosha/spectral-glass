@@ -44,6 +44,8 @@ function validateParams(u: unknown): Partial<Params> {
   if (isFiniteNumber(p.refractionStrength)) out.refractionStrength = p.refractionStrength;
   if (typeof p.temporalJitter === 'boolean') out.temporalJitter    = p.temporalJitter;
   if (typeof p.debugProxy === 'boolean')     out.debugProxy        = p.debugProxy;
+  if (typeof p.taa === 'boolean')            out.taa               = p.taa;
+  if (typeof p.paused === 'boolean')         out.paused            = p.paused;
   // Plate wave controls. Clamp defensively: amp below zero is meaningless;
   // wavelength of 1 px or less blows up the angular-frequency conversion in
   // main.ts (2π/λ) and would push the shader's Lipschitz margin over the

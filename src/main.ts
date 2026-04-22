@@ -160,6 +160,44 @@ async function main(): Promise<void> {
 
   const applySrgbOetf = needsSrgbOetf(ctx.format);
   const startTime     = performance.now();
+  // Wall-clock timestamp of the previous frame's update — used to compute
+  // dt for `sceneTime` accumulation. Seeded with `startTime` so the very
+  // first frame's dt is essentially zero and sceneTime starts at zero.
+  let prevWallTime = startTime;
+  // Scene time drives rotation + wave phase. Freezes when `params.paused` is
+  // true ("Stop the world") while the noise-time (`timeSafe` computed below)
+  // keeps advancing, so TAA sub-pixel jitter keeps accumulating samples and
+  // paused scenes continue to converge toward full AA quality.
+  //
+  // `prevSceneTime` feeds the GPU's motion-vector reprojection for TAA
+  // (history reads follow rotating shapes instead of smearing). Seeded with
+  // 0 so the first frame's reprojection is a no-op; historyBlend=1.0 on the
+  // opening two frames overwrites whatever transient error slips through.
+  let sceneTime     = 0;
+  let prevSceneTime = 0;
+
+  // Paused-frame counter — drives the progressive-averaging history blend.
+  // While "Stop the world" is on and the scene is static, we flip from
+  // α = 0.2 EMA (which never fully converges — per-pixel TAA sub-pixel
+  // jitter keeps flipping silhouette pixels between hit/miss, leaving ~45 %
+  // residual shimmer) to α = max(1/n, 1/256), which computes the true
+  // cumulative mean for the first ~256 paused frames and then plateaus at
+  // a 256-sample sliding window. Noise drops as 1/√n in the ramp phase and
+  // bottoms out at ~6 % residual at the cap.
+  //
+  // The 1/256 floor is required by the rgba16float history texture: a
+  // smaller α would push the new-sample contribution below the fp16
+  // quantum (≈ 0.0005 around mid-grey) for high-contrast edge pixels, the
+  // contribution would round to 0, and `(1 − α) · prev` decay would slowly
+  // fade silhouettes to black over several minutes. See the historyBlend
+  // computation below for the full derivation.
+  //
+  // Resets to 1 whenever motion resumes or `markSceneChanged()` fires the
+  // 2-frame history-overwrite reset (photo reload, shape switch, preset,
+  // pause toggle). Starts at 1 so the first post-reset paused frame uses
+  // α = 1/(pausedFrames+1) = 0.5 — correct weight for "average the new
+  // sample with the single-sample history the reset left behind".
+  let pausedFrames = 1;
 
   // GPU timestamp queries — always on when the adapter supports them so the
   // perf monitor in the UI has live data without a URL flag. `?perf=1` still
@@ -192,14 +230,48 @@ async function main(): Promise<void> {
           ? params.edgeR
           : Math.min(params.edgeR, pill.hx, pill.hy, pill.hz);
       }
-      const historyBlend = resetHistoryFrames > 0 ? 1.0 : 0.2;
+      // Paused-frame accounting for progressive averaging (see declaration
+      // above). During a reset-override window we hold pausedFrames at 1 so
+      // the first post-reset paused frame gets α = 1/2 — the correct weight
+      // for folding the fresh sample into the single-sample history the
+      // reset overwrote.
+      //
+      // The progressive α is floored at 1/256 (≈ 0.004) because the history
+      // texture is rgba16float — its mantissa step around 0.5 is ~0.0005, so
+      // for an edge pixel where adjacent jitter samples differ by up to ~0.5
+      // (hit vs miss), `α · (new − prev)` falls below the fp16 quantum once
+      // α drops under ~0.001. The new sample contribution then rounds to 0
+      // and the blend collapses to `(1 − α) · prev`, which is pure decay —
+      // visibly the silhouette darkens to a black line over a few minutes
+      // as (1 − 1/n)^N → 0. Capping α at 1/256 caps the post-pause
+      // convergence window at ~256 samples (effective noise floor ≈ 6 %)
+      // but keeps every contribution representable in fp16, so paused
+      // scenes stay stable instead of slowly fading.
+      if (!params.paused || resetHistoryFrames > 0) {
+        pausedFrames = 1;
+      } else {
+        pausedFrames += 1;
+      }
+      const steadyBlend  = params.paused
+        ? Math.max(1.0 / pausedFrames, 1.0 / 256)
+        : 0.2;
+      const historyBlend = resetHistoryFrames > 0 ? 1.0 : steadyBlend;
       if (resetHistoryFrames > 0) resetHistoryFrames -= 1;
 
       // Modulo the time to stay within float32 precision — sin/cos of huge
       // arguments visibly stutter after hours of uptime. Any value above the
-      // slowest rotation period (~31.4 s for 0.2 rad/s) is safe.
-      const elapsed  = (performance.now() - startTime) * 0.001;
+      // slowest rotation period (~31.4 s for 0.2 rad/s) is safe. `timeSafe`
+      // is the noise stream — driven by wall-clock so jitter keeps decorrel-
+      // ating across frames even when the scene is paused. sceneTime is the
+      // motion stream — accumulated from per-frame dt and skipped while
+      // paused, so unpause resumes rotation/wave from exactly the frozen
+      // pose instead of jumping forward by the pause duration.
+      const wallNow  = performance.now();
+      const elapsed  = (wallNow - startTime) * 0.001;
       const timeSafe = elapsed % 1e4;
+      const dt       = (wallNow - prevWallTime) * 0.001;
+      prevWallTime   = wallNow;
+      if (!params.paused) { sceneTime = (sceneTime + dt) % 1e4; }
 
       const N = forceN3 ? 3 : params.sampleCount;
       // Hero wavelength: one visible-range wavelength per frame, all pixels
@@ -227,6 +299,9 @@ async function main(): Promise<void> {
         cameraZ,
         projection:         PROJECTION_ID[params.projection],
         debugProxy:         params.debugProxy,
+        taaEnabled:         params.taa,
+        sceneTime,
+        prevSceneTime,
         // Plate wave params: amp is straight pixels, but the GPU wants an
         // angular frequency (rad/px) so it can feed sin() directly. UI thinks
         // in "wavelength in px" (more intuitive) → convert 2π/λ here.
@@ -237,6 +312,11 @@ async function main(): Promise<void> {
 
       draw(ctx, pl, history, pills.length, perf?.writes, perf ? (enc) => perf.resolve(enc) : undefined);
       history.current = history.current === 0 ? 1 : 0;
+      // Remember this frame's scene time so the next writeFrame can feed the
+      // GPU the rotation state one frame ago for TAA reprojection. This is
+      // the *scene* time, not the noise time — when paused, it holds steady
+      // so the prev rotation matches the current one (no reprojection delta).
+      prevSceneTime = sceneTime;
 
       if (perf) {
         void perf.readMs().then((ms) => {

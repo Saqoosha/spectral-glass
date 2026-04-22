@@ -22,6 +22,8 @@ export type Params = {
   projection: 'ortho' | 'perspective';
   fov: number;  // full vertical field-of-view in degrees
   debugProxy: boolean;  // tint proxy fragments pink
+  taa: boolean;  // sub-pixel jitter + history EMA antialiasing
+  paused: boolean;  // "Stop the world" — freeze rotation/wave while keeping AA converging
   // Plate-only wave controls. Amp in pixels (midsurface z-displacement);
   // wavelength in pixels (converted to angular frequency 2π/wavelength on
   // the GPU side via the waveFreq uniform). Exposed as length so the UI
@@ -257,6 +259,8 @@ export function initUi(
     options: { Orthographic: 'ortho', Perspective: 'perspective' },
   });
   misc.addBinding(params, 'fov', { min: FOV_MIN, max: FOV_MAX, step: 1, label: 'FOV°' });
+  misc.addBinding(params, 'paused', { label: 'Stop the world' });
+  misc.addBinding(params, 'taa', { label: 'TAA' });
   misc.addBinding(params, 'debugProxy', { label: 'Show proxy' });
 
   const presets = pane.addFolder({ title: 'Presets' });
@@ -363,6 +367,8 @@ export function defaultParams(): Params {
     projection: 'perspective',
     fov: 60,
     debugProxy: false,
+    taa: true,
+    paused: false,
     waveAmp: 20,
     waveWavelength: 300,
   };

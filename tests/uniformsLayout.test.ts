@@ -70,10 +70,12 @@ describe('uniform layout drift detector', () => {
       'n_d', 'V_d', 'sampleCount', 'refractionStrength',
       'jitter', 'refractionMode', 'pillCount', 'applySrgbOetf',
       'shape', 'time', 'historyBlend', 'heroLambda',
-      'cameraZ', 'projection', 'debugProxy', '_pad0',
+      'cameraZ', 'projection', 'debugProxy', 'taaEnabled',
       'cubeRot',
+      'cubeRotPrev',
       'plateRot',
-      'waveAmp', 'waveFreq', 'waveLipFactor', '_padWave1',
+      'plateRotPrev',
+      'waveAmp', 'waveFreq', 'waveLipFactor', 'sceneTime',
       'pills',
     ]);
   });

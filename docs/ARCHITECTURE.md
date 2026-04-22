@@ -12,7 +12,7 @@ refraction shader only runs on fragments the proxy actually covers.
 │                                                                      │
 │  1. resize canvas + history if needed                                │
 │  2. push params → pills (hx/hy/hz/edgeR)                             │
-│  3. writeFrame → uniform buffer (448 B: scalars + 2×mat3 + pills)    │
+│  3. writeFrame → uniform buffer (544 B: scalars + 4×mat3 + pills)    │
 │  4. draw pass:                                                       │
 │     a. bg sub-pass: fullscreen triangle → fs_bg (photo + history)    │
 │     b. proxy sub-pass: instanced 3D cube mesh → fs_main              │
@@ -85,36 +85,54 @@ offset   0 │ resolution.xy,  photoSize.xy                        (16 B)
 offset  16 │ n_d, V_d, sampleCount, refractionStrength           (16 B)
 offset  32 │ jitter, refractionMode, pillCount, applySrgbOetf    (16 B)
 offset  48 │ shape, time, historyBlend, heroLambda               (16 B)
-offset  64 │ cameraZ, projection, debugProxy, _pad0              (16 B)
-offset  80 │ cubeRot:  mat3x3<f32>  (3 × 16 B padded columns)    (48 B)
-offset 128 │ plateRot: mat3x3<f32>  (3 × 16 B padded columns)    (48 B)
-offset 176 │ waveAmp, waveFreq, waveLipFactor, _padWave1         (16 B)
-offset 192 │ pills[0..8]   each pill is:                         (32 B each)
+offset  64 │ cameraZ, projection, debugProxy, taaEnabled         (16 B)
+offset  80 │ cubeRot:      mat3x3<f32>                           (48 B)
+offset 128 │ cubeRotPrev:  mat3x3<f32>                           (48 B)
+offset 176 │ plateRot:     mat3x3<f32>                           (48 B)
+offset 224 │ plateRotPrev: mat3x3<f32>                           (48 B)
+offset 272 │ waveAmp, waveFreq, waveLipFactor, sceneTime         (16 B)
+offset 288 │ pills[0..8]   each pill is:                         (32 B each)
            │   center.xyz, edgeR,   halfSize.xyz, _pad
 ```
 
-Total 448 bytes (80 B head + 48 B cubeRot + 48 B plateRot + 16 B plate wave
-params + 8 × 32 B pills). Uniform size is fixed — pills beyond `pillCount`
-are zeros.
+Total 544 bytes (80 B head + 4 × 48 B rotation matrices + 16 B plate
+wave/scene-time block + 8 × 32 B pills). Uniform size is fixed — pills
+beyond `pillCount` are zeros.
 
 - `shape` selects the SDF (0=pill, 1=prism, 2=cube, 3=plate).
-- `time` is used by the GPU as the per-frame jitter hash seed; the host
-  separately derives `cubeRot` / `plateRot` from the same value (see
-  `src/math/cube.ts` / `src/math/plate.ts`).
-- `cubeRot` is the cube's rz·rx rotation, `plateRot` is the plate's rx·ry
-  tumble. Both precomputed on the host once per frame so the shader does
-  one mat-vec instead of multiple cos/sin in every SDF evaluation.
+- `time` is the noise stream — wall-clock seconds, always advancing so TAA
+  jitter and wavelength stratification keep decorrelating across frames
+  even while the scene is paused.
+- `sceneTime` is the motion stream — accumulated from per-frame `dt` and
+  skipped whenever `params.paused` is true. Drives the rotation matrices
+  and the plate's wave phase. Decoupled from `time` so "Stop the world"
+  freezes motion without freezing AA convergence.
+- `cubeRot` / `plateRot` are the current frame's rotations (rz·rx for cube,
+  rx·ry for plate), precomputed on the host from `sceneTime` so the shader
+  does one mat-vec instead of multiple cos/sin in every SDF evaluation.
+  `cubeRotPrev` / `plateRotPrev` are the same matrices computed from the
+  previous frame's `sceneTime` — feed `reprojectHit` for TAA motion-vector
+  history reads. When paused they equal the current matrices, so the
+  reprojection collapses to identity and history reads land on the pixel
+  centre (no iterated bilinear blur).
+- `taaEnabled` toggles temporal antialiasing. When on, `fs_main` jitters
+  the primary ray by a per-pixel hash within ±0.5 px, and reads history at
+  `fragCoord + (projected_prev_world − projected_curr_world)` — jitter
+  cancels in the delta so static scenes read pixel-aligned history while
+  moving shapes keep refracted texture sharp.
 - `waveAmp` / `waveFreq` drive the plate's midsurface displacement
-  (`waveAmp · sin(waveFreq · x + 2t) · sin(waveFreq · y + 2t)`). Ignored
-  for other shapes.
+  (`waveAmp · sin(waveFreq · x + 2·sceneTime) · sin(waveFreq · y +
+  2·sceneTime)`). Ignored for other shapes.
 - `waveLipFactor = 1/√(1 + 2·(waveAmp·waveFreq)²)` is the precomputed
   Lipschitz safety factor `sdfWavyPlate` multiplies into its output, so
   sphere-trace steps stay inside the true distance without running
   `inverseSqrt` on every SDF eval (≈ 0.86 at defaults vs the older hardcoded
   0.6 — ~43 % more progress per step at the same safety margin).
 - `historyBlend` is 0.2 in steady state and 1.0 for one frame after a scene
-  change (preset click, photo reload, shape switch, pill shuffle) so stale
-  temporal history doesn't ghost in.
+  change (preset click, photo reload, shape switch, pill shuffle, pause
+  toggle) so stale temporal history doesn't ghost in. Switches to
+  progressive averaging `α = 1/n` while "Stop the world" is on, so paused
+  scenes converge to noise-free output as 1/√n.
 - `heroLambda` is a frame-jittered wavelength in [380, 700] — used by Approx
   mode for the one shared back-face trace.
 - `cameraZ` / `projection` drive ortho vs perspective (CPU derives `cameraZ`
