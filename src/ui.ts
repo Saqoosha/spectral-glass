@@ -290,19 +290,24 @@ export function initUi(
 }
 
 export function defaultParams(): Params {
+  // Opening scene: four Rainbow-soap cubes in perspective. Extreme dispersion
+  // (V_d = 2) over a random Picsum photo gives a dramatic per-wavelength
+  // rainbow on every rotating face — the kind of first impression the spectral
+  // pipeline exists to produce. Users can switch materials or shape from the
+  // Tweakpane Presets / Materials folders.
   return {
-    sampleCount: 8,
-    shape: 'pill',
-    n_d: 1.5168,
-    V_d: 25,
-    pillLen: 320,
-    pillShort: 88,
-    pillThick: 40,
-    edgeR: 14,
-    refractionStrength: 0.15,
+    sampleCount: 16,
+    shape: 'cube',
+    n_d: 1.272,
+    V_d: 2.0,
+    pillLen: 300,
+    pillShort: 300,
+    pillThick: 300,
+    edgeR: 30,
+    refractionStrength: 0.2,
     refractionMode: 'exact',
     temporalJitter: true,
-    projection: 'ortho',
+    projection: 'perspective',
     fov: 60,
     debugProxy: false,
   };

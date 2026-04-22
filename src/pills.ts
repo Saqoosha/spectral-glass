@@ -4,19 +4,25 @@ export type Pill = {
   edgeR: number;
 };
 
-export function defaultPills(width: number, height: number, count = 4): Pill[] {
-  const pills: Pill[] = [];
-  const step = width / (count + 1);
-  for (let i = 0; i < count; i++) {
-    pills.push({
-      cx: step * (i + 1),
-      cy: height * 0.5 + (i % 2 === 0 ? -60 : 60),
-      cz: 0,
-      hx: 160, hy: 44, hz: 20,
-      edgeR: 14,
-    });
-  }
-  return pills;
+export function defaultPills(width: number, height: number): Pill[] {
+  // Hand-tuned asymmetric layout for the four-cube opening scene (see
+  // `defaultParams` in ui.ts). Expressed as fractions of the viewport so the
+  // composition scales from a phone-width window up to a 4K monitor.
+  // `hx/hy/hz`/`edgeR` here are just placeholders — the render loop overwrites
+  // them from `params.pillLen/Short/Thick` every frame.
+  const layout: ReadonlyArray<readonly [number, number]> = [
+    [0.22, 0.31],
+    [0.49, 0.43],
+    [0.31, 0.59],
+    [0.67, 0.77],
+  ];
+  return layout.map(([fx, fy]) => ({
+    cx: width  * fx,
+    cy: height * fy,
+    cz: 0,
+    hx: 150, hy: 150, hz: 150,
+    edgeR: 30,
+  }));
 }
 
 type DragState =
