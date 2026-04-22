@@ -9,7 +9,7 @@ export const FOV_MAX = 120;
 
 export type Params = {
   sampleCount: 3 | 8 | 16 | 32 | 64;
-  shape: 'pill' | 'prism' | 'cube';
+  shape: 'pill' | 'prism' | 'cube' | 'plate';
   n_d: number;
   V_d: number;
   pillLen: number;
@@ -22,6 +22,12 @@ export type Params = {
   projection: 'ortho' | 'perspective';
   fov: number;  // full vertical field-of-view in degrees
   debugProxy: boolean;  // tint proxy fragments pink
+  // Plate-only wave controls. Amp in pixels (midsurface z-displacement);
+  // wavelength in pixels (converted to angular frequency 2π/wavelength on
+  // the GPU side via the waveFreq uniform). Exposed as length so the UI
+  // label reads naturally; the conversion happens in main.ts.
+  waveAmp: number;
+  waveWavelength: number;
 };
 
 type Preset = {
@@ -120,6 +126,27 @@ const PRESETS: readonly Preset[] = [
       p.refractionMode     = 'exact';
     },
   },
+  {
+    label: 'Wavy plate',
+    apply: (p) => {
+      // Thick square plate, tumbling. Constant-thickness bent sheet means the
+      // chromatic effect tracks the bend in the midsurface, so pairing with
+      // extreme-dispersion "Rainbow soap" paints the ripple pattern with
+      // rainbow everywhere on the photo behind.
+      p.shape              = 'plate';
+      p.sampleCount        = 16;
+      p.n_d                = 1.272;
+      p.V_d                = 2.0;
+      p.pillLen            = 400;  // square face
+      p.pillShort          = 400;  // unused (forced = pillLen in main.ts)
+      p.pillThick          = 100;  // thick slab — thin plates lose chroma
+      p.edgeR              = 15;   // unused for plate (slider hidden)
+      p.waveAmp            = 20;
+      p.waveWavelength     = 300;
+      p.refractionStrength = 0.2;
+      p.refractionMode     = 'exact';
+    },
+  },
 ];
 
 export type PerfBinding = {
@@ -154,7 +181,12 @@ export function initUi(
 
   const shape = pane.addFolder({ title: 'Shape' });
   const shapeBinding = shape.addBinding(params, 'shape', {
-    options: { Pill: 'pill', 'Prism (rainbow)': 'prism', 'Cube (rotating)': 'cube' },
+    options: {
+      Pill:              'pill',
+      'Prism (rainbow)': 'prism',
+      'Cube (rotating)': 'cube',
+      'Plate (wavy)':    'plate',
+    },
   });
   // Pill / prism keep the three independent X/Y/Z sliders (their geometries
   // care about the asymmetry — a tall thin pill vs a wide slab look very
@@ -173,16 +205,32 @@ export function initUi(
     params.pillShort = cubeSize.value;
     params.pillThick = cubeSize.value;
   });
-  shape.addBinding(params, 'edgeR', { min: 1, max: 100, step: 0.5, label: 'Edge radius' });
+  const edgeBinding = shape.addBinding(params, 'edgeR', { min: 1, max: 100, step: 0.5, label: 'Edge radius' });
+  // Plate-only wave controls. Both stay hidden for pill/prism/cube and
+  // animate in only when shape === 'plate' (syncShapeSliders below).
+  const waveAmpBinding = shape.addBinding(params, 'waveAmp', {
+    min: 0, max: 60, step: 0.5, label: 'Wave amp',
+  });
+  const waveLenBinding = shape.addBinding(params, 'waveWavelength', {
+    min: 60, max: 800, step: 1, label: 'Wavelength',
+  });
 
-  // Show one or three sliders depending on shape, and keep cubeSize in sync
-  // with pillLen so switching shape mid-session doesn't surprise the user.
+  // Show the right subset of sliders for each shape. Pill/prism use all three
+  // X/Y/Z; cube collapses into a single Size slider (halfSize must stay equal
+  // for the rotation to be a true cube); plate uses Length (square face,
+  // hy ≡ hx forced in main.ts) + Thick, so we hide the Short slider. Also
+  // keeps cubeSize in sync with pillLen so switching shape mid-session
+  // doesn't surprise the user.
   function syncShapeSliders(): void {
-    const isCube = params.shape === 'cube';
-    lenBinding.hidden   = isCube;
-    shortBinding.hidden = isCube;
-    thickBinding.hidden = isCube;
-    sizeBinding.hidden  = !isCube;
+    const isCube  = params.shape === 'cube';
+    const isPlate = params.shape === 'plate';
+    lenBinding.hidden      = isCube;
+    shortBinding.hidden    = isCube || isPlate;
+    thickBinding.hidden    = isCube;
+    sizeBinding.hidden     = !isCube;
+    edgeBinding.hidden     = isPlate;   // plate reuses the field? No — wave controls below. Hide edgeR.
+    waveAmpBinding.hidden  = !isPlate;
+    waveLenBinding.hidden  = !isPlate;
     if (isCube) {
       // Average the three dims to seed Size — covers the case where shape
       // was just switched from pill/prism with non-equal extents.
@@ -193,6 +241,11 @@ export function initUi(
       params.pillThick = avg;
     } else {
       cubeSize.value = params.pillLen;
+      if (isPlate) {
+        // Mirror pillLen into pillShort so persistence / non-plate shapes
+        // inherit a sensible value if the user later switches back.
+        params.pillShort = params.pillLen;
+      }
     }
   }
   syncShapeSliders();
@@ -310,6 +363,8 @@ export function defaultParams(): Params {
     projection: 'perspective',
     fov: 60,
     debugProxy: false,
+    waveAmp: 20,
+    waveWavelength: 300,
   };
 }
 

@@ -50,18 +50,19 @@ export function attachDrag(
 
   // Hit testing is shape-aware:
   //   pill / prism (shape 0 / 1): XY axis-aligned box (Z is not visible top-down)
-  //   cube (shape 2):             circular radius using the 3D diagonal, because
-  //                               the rotating cube's silhouette changes as it
-  //                               tumbles — a circle around the center always
-  //                               contains the visible footprint.
+  //   cube / plate (shape 2 / 3): circular radius, because the rotating /
+  //                               tumbling silhouette changes over time —
+  //                               a circle around the center always contains
+  //                               the visible footprint (plate adds `edgeR`
+  //                               as wave amplitude margin).
   const findHit = (x: number, y: number): number => {
     const shapeId = getShapeId();
     for (let i = pills.length - 1; i >= 0; i--) {
       const p  = pills[i]!;
       const dx = x - p.cx;
       const dy = y - p.cy;
-      if (shapeId === 2) {
-        const r = Math.max(p.hx, p.hy, p.hz);
+      if (shapeId === 2 || shapeId === 3) {
+        const r = Math.max(p.hx, p.hy, p.hz) + (shapeId === 3 ? p.edgeR : 0);
         if (dx * dx + dy * dy <= r * r) return i;
       } else {
         if (Math.abs(dx) <= p.hx && Math.abs(dy) <= p.hy) return i;

@@ -60,9 +60,10 @@ function declaredFields(body: string): { name: string; type: string }[] {
 describe('uniform layout drift detector', () => {
   it('Frame struct declares the fields uniforms.ts expects, in order', () => {
     const fields = declaredFields(FRAME_BODY);
-    // The WGSL struct must end with `cubeRot: mat3x3<f32>` and then
-    // `pills: array<PillGpu, MAX_PILLS>`. Anything else means uniforms.ts'
-    // HEAD_FLOATS / CUBE_ROT_FLOATS / pillBase need to move with it.
+    // The WGSL struct must end with cubeRot / plateRot / plate-wave scalars
+    // and then `pills: array<PillGpu, MAX_PILLS>`. Anything else means
+    // uniforms.ts' HEAD_FLOATS / CUBE_ROT_FLOATS / PLATE_ROT_FLOATS /
+    // PLATE_PARAMS_FLOATS / pillBase need to move with it.
     const names = fields.map((f) => f.name);
     expect(names).toEqual([
       'resolution', 'photoSize',
@@ -71,20 +72,23 @@ describe('uniform layout drift detector', () => {
       'shape', 'time', 'historyBlend', 'heroLambda',
       'cameraZ', 'projection', 'debugProxy', '_pad0',
       'cubeRot',
+      'plateRot',
+      'waveAmp', 'waveFreq', 'waveLipFactor', '_padWave1',
       'pills',
     ]);
   });
 
-  it('cubeRot is still mat3x3<f32> (matches CUBE_ROT_FLOATS=12 / 48 B)', () => {
-    // If the field order changes, the previous test fires first. This pins the
-    // type so a swap to e.g. mat4x4 (which is 64 B, not 48) trips a separate
-    // failure — it would otherwise pass the order test but corrupt pills.
+  it('cubeRot / plateRot are both mat3x3<f32> (12 floats / 48 B each)', () => {
+    // If the field order changes, the previous test fires first. This pins
+    // the types so a swap to e.g. mat4x4 (which is 64 B, not 48) trips a
+    // separate failure — otherwise the order test would pass but pills
+    // would be corrupted.
     const fields = declaredFields(FRAME_BODY);
-    const cubeRot = fields.find((f) => f.name === 'cubeRot');
-    expect(cubeRot?.type).toBe('mat3x3<f32>');
+    expect(fields.find((f) => f.name === 'cubeRot')?.type).toBe('mat3x3<f32>');
+    expect(fields.find((f) => f.name === 'plateRot')?.type).toBe('mat3x3<f32>');
   });
 
-  it('pills is the last field (so HEAD_FLOATS+CUBE_ROT_FLOATS is the right base)', () => {
+  it('pills is the last field (so HEAD + rotations + plateParams is the right base)', () => {
     const fields = declaredFields(FRAME_BODY);
     expect(fields[fields.length - 1]?.name).toBe('pills');
     expect(fields[fields.length - 1]?.type).toBe('array<PillGpu, MAX_PILLS>');

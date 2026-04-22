@@ -17,7 +17,7 @@ type Loaded = {
 
 // Allow-lists for the enum-like fields so a corrupted / hand-edited localStorage
 // can't push invalid strings into the render pipeline.
-const SHAPES        = new Set<Params['shape']>(['pill', 'prism', 'cube']);
+const SHAPES        = new Set<Params['shape']>(['pill', 'prism', 'cube', 'plate']);
 const MODES         = new Set<Params['refractionMode']>(['exact', 'approx']);
 const PROJECTIONS   = new Set<Params['projection']>(['ortho', 'perspective']);
 const SAMPLE_COUNTS = new Set<Params['sampleCount']>([3, 8, 16, 32, 64]);
@@ -44,6 +44,12 @@ function validateParams(u: unknown): Partial<Params> {
   if (isFiniteNumber(p.refractionStrength)) out.refractionStrength = p.refractionStrength;
   if (typeof p.temporalJitter === 'boolean') out.temporalJitter    = p.temporalJitter;
   if (typeof p.debugProxy === 'boolean')     out.debugProxy        = p.debugProxy;
+  // Plate wave controls. Clamp defensively: amp below zero is meaningless;
+  // wavelength of 1 px or less blows up the angular-frequency conversion in
+  // main.ts (2π/λ) and would push the shader's Lipschitz margin over the
+  // edge.
+  if (isFiniteNumber(p.waveAmp))         out.waveAmp        = Math.max(0, p.waveAmp);
+  if (isFiniteNumber(p.waveWavelength))  out.waveWavelength = Math.max(2, p.waveWavelength);
   return out;
 }
 

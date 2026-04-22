@@ -3,11 +3,11 @@
 > **Live demo**: <https://saqoosha.github.io/spectral-glass/> (Chrome/Edge 120+ or Safari 18+)
 
 A realtime WebGPU demo of **physically accurate spectral dispersion** through
-Apple "Liquid Glass"-style floating pills, triangular prisms, and rotating
-cubes. Unlike the common "shift R/G/B IORs" hack that most web implementations
-use (including Three.js's `MeshPhysicalMaterial.dispersion`), this samples the
-full visible spectrum per-wavelength and reconstructs the final color via CIE
-1931 color matching functions.
+Apple "Liquid Glass"-style floating pills, triangular prisms, rotating cubes,
+and tumbling wavy plates. Unlike the common "shift R/G/B IORs" hack that most
+web implementations use (including Three.js's `MeshPhysicalMaterial.dispersion`),
+this samples the full visible spectrum per-wavelength and reconstructs the
+final color via CIE 1931 color matching functions.
 
 ![Cubes over rooftops](docs/images/demo-default.png)
 
@@ -62,8 +62,8 @@ Requires a WebGPU-capable browser (Chrome / Edge 120+, Safari 18+).
 | **`Z`** (hold) | Force `N = 3` (fake RGB dispersion) for A/B comparison |
 | **Space** | Shuffle pills to random positions |
 | **`R`** | Reload a new random Picsum photo |
-| Tweakpane | IOR, Abbe, sample count, shape (pill / prism / cube), dimensions, refraction strength, projection (ortho / perspective), FOV, temporal jitter, refraction mode |
-| Presets | Subtle pill · Strong dispersion · Prism rainbow · Rotating cube |
+| Tweakpane | IOR, Abbe, sample count, shape (pill / prism / cube / plate), dimensions, wave amp + wavelength (plate only), refraction strength, projection (ortho / perspective), FOV, temporal jitter, refraction mode |
+| Presets | Subtle pill · Strong dispersion · Prism rainbow · Rotating cube · Wavy plate |
 | Materials | 10 real-world glasses (water → BK7 → SF flints → diamond → moissanite) + 4 fantasy (n_d up to 3.5, V_d down to 2) |
 
 Add `?perf=1` to the URL to enable the GPU timestamp HUD — timings are
@@ -77,11 +77,14 @@ every proxy fragment pink and see the rasterised silhouette.
   refraction shader only runs on fragments inside the proxy silhouette.
   Back-face culling (CCW-outward 3D → CW NDC after Y-flip) gives exactly one
   invocation per covered pixel.
-- **3D SDFs, three shapes.** Pill (stadium XY + rounded Z), prism
-  (isosceles triangle in YZ extruded in X), and rotating cube (rounded box +
-  per-frame `rot * (p - center)` via `cubeRotation(time)`). Cube's proxy
-  corners are transformed by `transpose(rot)` so the rasterised silhouette
-  tracks the shader's rotation exactly — no √3 bounding-box slack.
+- **3D SDFs, four shapes.** Pill (stadium XY + rounded Z), prism
+  (isosceles triangle in YZ extruded in X), rotating cube (rounded box +
+  per-frame `rot * (p - center)` via `cubeRotation(time)`), and tumbling
+  **wavy plate** — a thick square slab whose midsurface bends in Z along
+  `waveAmp · sin(kx+t) · sin(ky+t)` while both faces ride that midsurface
+  together, keeping thickness uniform. Cube and plate proxy corners are
+  transformed by `transpose(rot)` so the rasterised silhouette tracks the
+  shader's rotation exactly — no √3 bounding-box slack.
 - **Ortho or perspective projection.** UI toggle. Ortho keeps the flat Liquid
   Glass aesthetic; perspective uses a pinhole camera at `(w/2, h/2, cameraZ)`
   with `cameraZ = (height/2) / tan(fov/2)` derived from the user-facing FOV.
@@ -91,7 +94,10 @@ every proxy fragment pink and see the rasterised silhouette.
   lookup tables.
 - **Two-surface refraction.** Front hit via primary sphere-trace, back exit via
   per-wavelength inside-trace (Exact mode) or shared hero-wavelength trace
-  (Approx mode, Wilkie 2014).
+  (Approx mode, Wilkie 2014). Cube and plate both skip the inside-trace
+  entirely — their back-face exit is an analytical slab intersection (plus
+  Newton refinement for plate's wavy surface), ≈ 10× fewer SDF evals per
+  wavelength than pill / prism.
 - **Per-wavelength Fresnel.** Blue λ has higher IOR → higher Schlick Fresnel
   → visible blue-tinged rim on diamonds and prisms (the classic "fire" of
   high-index crystals).
@@ -123,7 +129,9 @@ src/
 │   ├── srgb.ts                 XYZ → linear sRGB matrix + OETF
 │   ├── sdfPill.ts              3D pill SDF (mirrors WGSL version)
 │   ├── sdfPrism.ts             Triangular prism SDF (mirrors WGSL version)
-│   └── sdfCube.ts              Rounded box / cube SDF (mirrors WGSL version)
+│   ├── sdfCube.ts              Rounded box / cube SDF (mirrors WGSL version)
+│   ├── cube.ts                 rz·rx rotation columns for the tumbling cube
+│   └── plate.ts                rx·ry rotation columns for the tumbling plate
 ├── persistence.ts              localStorage: validated load, debounced save, pagehide flush
 ├── photo.ts                    Picsum fetch → GPU texture (w/ gradient fallback)
 ├── pills.ts                    Pill state + shape-aware pointer drag
@@ -166,11 +174,12 @@ samples):
 | cube N=64 | 3.21 ms |
 
 All within the 16.67 ms vsync budget. Background pixels cost ~nothing; the
-per-λ loop dominates on pill / prism / cube pixels. Cube is noticeably
-cheaper than pill at the same `N` because the back-face exit is an
-analytical slab intersection instead of the per-wavelength sphere-trace
-pill/prism still pay. Apple's TBDR already culls background efficiently,
-but discrete GPUs gain more from the proxy pass.
+per-λ loop dominates on pill / prism / cube / plate pixels. Cube and plate
+are noticeably cheaper than pill at the same `N` because their back-face
+exits are analytical slab intersections instead of the per-wavelength
+sphere-trace pill/prism still pay — plate adds 3 Newton iterations on top
+to land on its wavy surface. Apple's TBDR already culls background
+efficiently, but discrete GPUs gain more from the proxy pass.
 
 ## References
 

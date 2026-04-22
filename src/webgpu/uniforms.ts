@@ -1,5 +1,6 @@
 import type { Pill } from '../pills';
 import { cubeRotationColumns } from '../math/cube';
+import { plateRotationColumns } from '../math/plate';
 
 export const MAX_PILLS = 8;
 
@@ -13,13 +14,15 @@ export type FrameParams = {
   readonly jitter:             number;
   readonly refractionMode:     number;
   readonly applySrgbOetf:      boolean;
-  readonly shape:              number;  // 0 = pill, 1 = prism, 2 = cube
-  readonly time:               number;  // seconds since start. Host derives the cube rotation from this; the GPU also sees it raw for the jitter hash seed.
+  readonly shape:              number;  // 0 = pill, 1 = prism, 2 = cube, 3 = plate
+  readonly time:               number;  // seconds since start. Host derives the cube/plate rotations from this; the GPU also sees it raw for the jitter hash seed.
   readonly historyBlend:       number;  // 0..1 — 0.2 steady-state, 1.0 on scene-change frames to clear stale history
   readonly heroLambda:         number;  // [380, 700] — jittered each frame; drives hero-wavelength back-face trace
   readonly cameraZ:            number;  // distance from screen plane (z=0) to the camera, in pixels
   readonly projection:         number;  // 0 = orthographic, 1 = perspective
   readonly debugProxy:         boolean; // tint proxy fragments pink for debugging
+  readonly waveAmp:            number;  // plate: displacement amplitude (px). Ignored for other shapes.
+  readonly waveFreq:           number;  // plate: angular frequency (rad/px). Wavelength ≈ 2π/waveFreq.
   readonly pills:              readonly Pill[];
 };
 
@@ -29,12 +32,17 @@ export type FrameParams = {
 //   offset  32: jitter, refractionMode, pillCount, applySrgbOetf  (16 B)
 //   offset  48: shape, time, historyBlend, heroLambda             (16 B)
 //   offset  64: cameraZ, projection, debugProxy, _pad0            (16 B)
-//   offset  80: cubeRot mat3x3<f32> (3 vec3 columns, 16 B each)   (48 B)
-//   offset 128: pills[0..MAX_PILLS] — each pill is vec3 + f32 + vec3 + f32 (32 B)
-const HEAD_FLOATS     = 20;                                         // 80 B
-const CUBE_ROT_FLOATS = 12;                                         // 48 B (3 padded cols)
-const PILL_FLOATS     = 8;                                          // 32 B per pill
-const TOTAL_FLOATS    = HEAD_FLOATS + CUBE_ROT_FLOATS + PILL_FLOATS * MAX_PILLS;
+//   offset  80: cubeRot  mat3x3<f32> (3 vec3 columns, 16 B each)  (48 B)
+//   offset 128: plateRot mat3x3<f32> (3 vec3 columns, 16 B each)  (48 B)
+//   offset 176: waveAmp, waveFreq, _padWave0, _padWave1           (16 B)
+//   offset 192: pills[0..MAX_PILLS] — each pill is vec3 + f32 + vec3 + f32 (32 B)
+const HEAD_FLOATS          = 20;                                    // 80 B
+const CUBE_ROT_FLOATS      = 12;                                    // 48 B (3 padded cols)
+const PLATE_ROT_FLOATS     = 12;                                    // 48 B
+const PLATE_PARAMS_FLOATS  = 4;                                     // 16 B (2 used + 2 pad)
+const PILL_FLOATS          = 8;                                     // 32 B per pill
+const TOTAL_FLOATS    = HEAD_FLOATS + CUBE_ROT_FLOATS + PLATE_ROT_FLOATS
+                       + PLATE_PARAMS_FLOATS + PILL_FLOATS * MAX_PILLS;
 const TOTAL_BYTES     = TOTAL_FLOATS * 4;
 
 // Reused across frames so we don't allocate a 384-byte Float32Array every tick.
@@ -78,9 +86,22 @@ export function writeFrame(device: GPUDevice, buf: GPUBuffer, p: FrameParams): v
   // Cube rotation: mat3x3<f32>. `cubeRotationColumns` returns 12 floats in the
   // exact WGSL layout (3 columns × 16 B, last float of each column is padding)
   // so we can just `set()` it wholesale at float index HEAD_FLOATS.
-  scratch.set(cubeRotationColumns(p.time), HEAD_FLOATS);
+  scratch.set(cubeRotationColumns(p.time),  HEAD_FLOATS);
+  // Plate rotation, same layout, placed immediately after cubeRot.
+  scratch.set(plateRotationColumns(p.time), HEAD_FLOATS + CUBE_ROT_FLOATS);
 
-  const pillBase = HEAD_FLOATS + CUBE_ROT_FLOATS;  // float index 32
+  // Plate wave parameters: amp (px), freq (rad/px), and the precomputed
+  // Lipschitz safety factor `1/sqrt(1 + 2·(amp·freq)²)` that sdfWavyPlate
+  // multiplies into its output. Hoisting the factor here saves an inverseSqrt
+  // on every SDF evaluation (up to ~70 per fragment on the plate path) since
+  // both amp and freq are uniform across the frame. Trailing slot is padding.
+  const plateParamsBase = HEAD_FLOATS + CUBE_ROT_FLOATS + PLATE_ROT_FLOATS;
+  const ampFreq         = p.waveAmp * p.waveFreq;
+  scratch[plateParamsBase + 0] = p.waveAmp;
+  scratch[plateParamsBase + 1] = p.waveFreq;
+  scratch[plateParamsBase + 2] = 1 / Math.sqrt(1 + 2 * ampFreq * ampFreq);
+
+  const pillBase  = plateParamsBase + PLATE_PARAMS_FLOATS;
   const pillCount = Math.min(p.pills.length, MAX_PILLS);
   for (let i = 0; i < pillCount; i++) {
     const pill = p.pills[i]!;

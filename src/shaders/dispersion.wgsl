@@ -21,7 +21,7 @@ struct Frame {
   refractionMode:     f32,
   pillCount:          f32,
   applySrgbOetf:      f32,  // 1.0 if canvas is non-sRGB and we must encode; 0.0 if -srgb
-  shape:              f32,  // 0 = pill (stadium), 1 = prism, 2 = cube (rotates)
+  shape:              f32,  // 0 = pill (stadium), 1 = prism, 2 = cube (rotates), 3 = plate (wavy, tumbles)
   time:               f32,  // seconds since start. GPU uses it for the jitter hash seed; the host derives `cubeRot` from the same value every frame.
   historyBlend:       f32,  // 0.2 steady state, 1.0 when the scene changed this frame
   heroLambda:         f32,  // jittered each frame in [380,700]; Hero mode uses this
@@ -41,6 +41,18 @@ struct Frame {
   // multiplies, one transpose, two inverse multiplies — all from the same
   // uniform, no extra cos/sin).
   cubeRot:            mat3x3<f32>,
+  // Plate rotation (rx·ry composed on the host from `time` — see
+  // src/math/plate.ts). Used by sdfWavyPlate for both SDF evaluation and by
+  // vs_proxy to rotate the proxy bounding box so it stays tight (cube-style).
+  plateRot:           mat3x3<f32>,
+  // Plate wave parameters. `waveLipFactor` is the precomputed safety factor
+  // 1/sqrt(1 + 2·(amp·freq)²) applied inside sdfWavyPlate so the raw
+  // (box - wave) value is a valid Lipschitz bound — host-side computation
+  // avoids an `inverseSqrt` on every SDF eval. Trailing slot is padding.
+  waveAmp:            f32,
+  waveFreq:           f32,
+  waveLipFactor:      f32,
+  _padWave1:          f32,
   pills:              array<PillGpu, MAX_PILLS>,
 };
 
@@ -100,6 +112,49 @@ fn sdfPrism(p: vec3<f32>, halfSize: vec3<f32>, edgeR: f32) -> f32 {
   return length(max(w, vec2<f32>(0.0))) + min(max(w.x, w.y), 0.0) - edgeR;
 }
 
+// Thick square plate as a CONSTANT-THICKNESS bent sheet. The midsurface
+// follows a sin·sin cross wave; both faces of the plate ride that midsurface
+// together so the thickness stays uniform at every (x, y) — the plate reads
+// as a rippling sheet rather than a pulsating blob.
+//
+// `halfSize.x` drives the square face extent (y is forced to match so the
+// plate stays square regardless of the pillShort slider), `halfSize.z` is
+// the half-thickness. Wave amplitude + frequency come from uniforms so they
+// can be wired to UI sliders without per-shape slot juggling.
+//
+// Tumble rotation is precomputed on the host as `frame.plateRot` (see
+// src/math/plate.ts) — same trick as cubeRot, saves four cos/sin per SDF eval.
+//
+// The returned distance is scaled by `frame.waveLipFactor` (computed on the
+// host as 1/sqrt(1 + 2·(amp·freq)²)) because the z-shift breaks the Lipschitz
+// constant along x/y: the shifted SDF has gradient magnitude
+// sqrt(1 + (∂waveZ/∂x)² + (∂waveZ/∂y)²) which grows with amp·freq. Dividing
+// by that bound keeps raymarch steps safely inside the true distance so the
+// trace never tunnels through the thin slab, while staying as aggressive as
+// the current wave parameters allow (~0.86 at defaults, previously a
+// conservative hardcoded 0.6 — ≈45% fewer sphereTrace steps at the same
+// safety margin).
+fn sdfWavyPlate(pIn: vec3<f32>, halfSize: vec3<f32>, t: f32) -> f32 {
+  let p = frame.plateRot * pIn;
+
+  // Force square XY face (halfSize.y ignored — UI hides pillShort for plate).
+  let h = vec3<f32>(halfSize.x, halfSize.x, halfSize.z);
+
+  // Midsurface z-displacement. Animated via phase-shift on t so the plate
+  // "pulses" independently of its tumble; 2t reads faster than the 0.2–0.3
+  // rad/s tumble so both motions are visible at once.
+  let k     = frame.waveFreq;
+  let waveZ = frame.waveAmp * sin(k * p.x + t * 2.0) * sin(k * p.y + t * 2.0);
+
+  // Slab centered on the wavy midsurface. Both faces ride `waveZ` together,
+  // giving a constant-thickness bent sheet instead of a bulge/pinch volume.
+  let pShift = vec3<f32>(p.x, p.y, p.z - waveZ);
+  let q      = abs(pShift) - h;
+  let box    = length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
+
+  return box * frame.waveLipFactor;
+}
+
 fn sceneSdf(p: vec3<f32>) -> f32 {
   let count   = min(u32(frame.pillCount), MAX_PILLS);
   let shapeId = i32(frame.shape + 0.5);
@@ -115,6 +170,10 @@ fn sceneSdf(p: vec3<f32>) -> f32 {
       pd = sdfCube(frame.cubeRot * local, pill.halfSize, pill.edgeR);
     } else if (shapeId == 1) {
       pd = sdfPrism(local, pill.halfSize, pill.edgeR);
+    } else if (shapeId == 3) {
+      // Plate: wave amp + freq come from global uniforms (frame.waveAmp /
+      // frame.waveFreq), pill.edgeR is ignored for this shape.
+      pd = sdfWavyPlate(local, pill.halfSize, frame.time);
     } else {
       pd = sdfPill(local, pill.halfSize, pill.edgeR);
     }
@@ -327,6 +386,122 @@ fn cubeAnalyticExit(roWorld: vec3<f32>, rdWorld: vec3<f32>, pillIdx: u32) -> Cub
   return CubeExit(pWorld, -nOut);
 }
 
+// Same idea as hitCubePillIdx but for plates. Picks the plate whose surface
+// is closest (by absolute SDF) to the front-hit point, so `plateAnalyticExit`
+// operates on the plate we actually hit even when multiple plates overlap.
+fn hitPlatePillIdx(p: vec3<f32>) -> u32 {
+  let count = min(u32(frame.pillCount), MAX_PILLS);
+  var best:  u32 = 0u;
+  var bestD: f32 = 1e9;
+  for (var i: u32 = 0u; i < count; i = i + 1u) {
+    let pill  = frame.pills[i];
+    let local = p - pill.center;
+    let d     = abs(sdfWavyPlate(local, pill.halfSize, frame.time));
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  return best;
+}
+
+// Analytical back-face intersection for a rotated wavy plate. Same payoff as
+// `cubeAnalyticExit`: replaces the per-wavelength `insideTrace` (up to 48 SDF
+// evals) + finite-diff `sceneNormal` (6 SDF evals) with one slab intersection
+// plus 3 Newton iterations for the Z-face refinement, so in N-sample Exact
+// mode we save ~60× N SDF evals per fragment.
+//
+// Pipeline:
+//   1. World → plate-local via `frame.plateRot`, same trick as cube.
+//   2. Axis-aligned slab intersection over (halfXY, halfXY, halfZ) — identical
+//      to cube except the box is asymmetric (thinner in Z).
+//   3. Pick the earliest-exit axis. Most refracted rays exit through the
+//      opposite Z face because the plate is thin relative to its face; side
+//      exits only happen at steep grazing angles near the plate rim.
+//   4. For a Z-face exit: Newton-refine t against the true wavy surface
+//      z = faceSign·halfZ + waveZ(x, y). Converges in 3 steps from the flat
+//      slab guess because the waveZ gradient magnitude is small (≤ amp·freq
+//      ≈ 0.4 at defaults) — the fixed point is very close to the slab plane.
+//   5. Normal on a wavy Z face is the gradient of z − faceSign·halfZ − waveZ:
+//      `(−faceSign·∂waveZ/∂x, −faceSign·∂waveZ/∂y, faceSign)` normalized. For
+//      X/Y face exits (flat) it's just the unit axis.
+//   6. Local → world via transpose(plateRot). Return inward-facing normal.
+fn plateAnalyticExit(roWorld: vec3<f32>, rdWorld: vec3<f32>, pillIdx: u32) -> CubeExit {
+  let pill = frame.pills[pillIdx];
+  // Plate forces a square face (y ≡ x), so override halfSize.y from the slot
+  // that might still be carrying a pill/cube value.
+  let h = vec3<f32>(pill.halfSize.x, pill.halfSize.x, pill.halfSize.z);
+
+  let roL = frame.plateRot * (roWorld - pill.center);
+  let rdL = frame.plateRot * rdWorld;
+
+  let rdInv = vec3<f32>(1.0) / rdL;
+  let tHi   = (h - roL) * rdInv;
+  let tLo   = (-h - roL) * rdInv;
+  let tExitAxis = max(tHi, tLo);
+
+  var tExit: f32;
+  var faceSign: f32;
+  var axis: i32;
+  if (tExitAxis.x <= tExitAxis.y && tExitAxis.x <= tExitAxis.z) {
+    axis = 0;
+    tExit = tExitAxis.x;
+    faceSign = select(-1.0, 1.0, tHi.x >= tLo.x);
+  } else if (tExitAxis.y <= tExitAxis.z) {
+    axis = 1;
+    tExit = tExitAxis.y;
+    faceSign = select(-1.0, 1.0, tHi.y >= tLo.y);
+  } else {
+    axis = 2;
+    tExit = tExitAxis.z;
+    faceSign = select(-1.0, 1.0, tHi.z >= tLo.z);
+  }
+
+  var pL    = roL + rdL * tExit;
+  var nOutL = vec3<f32>(0.0);
+
+  if (axis == 0) {
+    nOutL = vec3<f32>(faceSign, 0.0, 0.0);
+  } else if (axis == 1) {
+    nOutL = vec3<f32>(0.0, faceSign, 0.0);
+  } else {
+    // Z face: Newton-refine against the wavy surface. f(t) = pL.z − z*(pL.xy),
+    // where z*(x, y) = faceSign·halfZ + amp·sin(kx+φ)·sin(ky+φ).
+    let k     = frame.waveFreq;
+    let amp   = frame.waveAmp;
+    let phase = frame.time * 2.0;
+    for (var i: i32 = 0; i < 3; i = i + 1) {
+      let sx = sin(k * pL.x + phase);
+      let sy = sin(k * pL.y + phase);
+      let cx = cos(k * pL.x + phase);
+      let cy = cos(k * pL.y + phase);
+      let waveZ = amp * sx * sy;
+      let dWdx  = amp * k * cx * sy;
+      let dWdy  = amp * k * sx * cy;
+      let f     = pL.z - faceSign * h.z - waveZ;
+      let dfdt  = rdL.z - dWdx * rdL.x - dWdy * rdL.y;
+      if (abs(f) < HIT_EPS * 0.1) { break; }         // already on the surface
+      if (abs(dfdt) < 1e-4)       { break; }         // tangential — bail out
+      tExit = tExit - f / dfdt;
+      pL    = roL + rdL * tExit;
+    }
+    // Rebuild waveZ gradient at the refined pL for the normal.
+    let sx = sin(k * pL.x + phase);
+    let sy = sin(k * pL.y + phase);
+    let cx = cos(k * pL.x + phase);
+    let cy = cos(k * pL.y + phase);
+    let dWdx = amp * k * cx * sy;
+    let dWdy = amp * k * sx * cy;
+    // Outward normal on the wavy Z face. Derivation: for the back face
+    // (faceSign = -1), outward is (+∂waveZ/∂x, +∂waveZ/∂y, -1); for the front
+    // face (faceSign = +1), outward is (-∂waveZ/∂x, -∂waveZ/∂y, +1). Combined:
+    //   (−faceSign·∂waveZ/∂x, −faceSign·∂waveZ/∂y, faceSign).
+    nOutL = normalize(vec3<f32>(-faceSign * dWdx, -faceSign * dWdy, faceSign));
+  }
+
+  let rotT   = transpose(frame.plateRot);
+  let pWorld = rotT * pL + pill.center;
+  let nOut   = rotT * nOutL;
+  return CubeExit(pWorld, -nOut);
+}
+
 // ---------- spectral math ----------
 
 // Cauchy + Abbe number (glTF KHR_materials_dispersion formulation).
@@ -469,14 +644,25 @@ fn vs_proxy(
   // Unit cube corner in [-1, 1]^3 → local box sized to the pill's halfSize
   // (plus edgeR for the rounded rim so the proxy always fully covers the
   // actual shape).
-  let extent  = pill.halfSize + vec3<f32>(pill.edgeR);
-  var corner  = CUBE_VERTS[vi] * extent;
-
-  if (shapeId == 2) {
-    // The shader defines the cube via `local = rot * (p - center)`, so a
-    // world-space proxy corner that maps to the unit-cube local-space corner
-    // `c` is `center + transpose(rot) * (c * extent)`.
-    corner = transpose(frame.cubeRot) * corner;
+  var corner: vec3<f32>;
+  if (shapeId == 3) {
+    // Plate: box sized to the square face + wave-amplitude margin on the Z
+    // (thickness) axis so the rippling midsurface never pokes through. Then
+    // apply the plate's current rotation so the proxy tracks the tumble —
+    // same tight-bounding trick as the cube path below.
+    let extent = vec3<f32>(pill.halfSize.x,
+                           pill.halfSize.x,
+                           pill.halfSize.z + frame.waveAmp);
+    corner = transpose(frame.plateRot) * (CUBE_VERTS[vi] * extent);
+  } else {
+    let extent = pill.halfSize + vec3<f32>(pill.edgeR);
+    corner     = CUBE_VERTS[vi] * extent;
+    if (shapeId == 2) {
+      // The shader defines the cube via `local = rot * (p - center)`, so a
+      // world-space proxy corner that maps to the unit-cube local-space
+      // corner `c` is `center + transpose(rot) * (c * extent)`.
+      corner = transpose(frame.cubeRot) * corner;
+    }
   }
   return projectWorld(pill.center + corner);
 }
@@ -554,19 +740,25 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
   let strength = frame.refractionStrength;
   let jitter   = frame.jitter;
   let useHero  = frame.refractionMode > 0.5;
-  let isCube   = i32(frame.shape + 0.5) == 2;
+  let shapeId  = i32(frame.shape + 0.5);
+  let isCube   = shapeId == 2;
+  let isPlate  = shapeId == 3;
+  let hasAnalyticExit = isCube || isPlate;
 
   // Cap the inside-trace at the longest possible chord through the largest
   // pill in the scene. Thick configurations would otherwise bail out mid-body.
   let internalMax = maxInternalPath();
 
-  // Pill the front hit belongs to. Only used for the analytical cube path —
-  // pill/prism keep sphere-tracing the whole scene. Picked by per-pill SDF
-  // minimum at the hit point so overlapping cubes still resolve correctly.
-  // Gated on `isCube` so pill/prism don't pay the per-pill sdfCube scan.
-  var cubeIdx: u32 = 0u;
+  // Pill the front hit belongs to. Only used for the analytical cube / plate
+  // paths — pill/prism keep sphere-tracing the whole scene. Picked by per-pill
+  // SDF minimum at the hit point so overlapping shapes still resolve
+  // correctly. Gated on `hasAnalyticExit` so the non-analytic shapes don't pay
+  // the per-pill SDF scan.
+  var analyticIdx: u32 = 0u;
   if (isCube) {
-    cubeIdx = hitCubePillIdx(h.p);
+    analyticIdx = hitCubePillIdx(h.p);
+  } else if (isPlate) {
+    analyticIdx = hitPlatePillIdx(h.p);
   }
 
   // Hero mode: one back-face trace at a PER-FRAME-RANDOMIZED wavelength
@@ -582,12 +774,15 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
     // (h.p, -nFront) so the wavelength loop falls through to the reflection
     // path via Fresnel. Practically this can't fire today (cauchyIor clamps
     // ior >= 1.0 and the entry is vacuum→glass), but both back-trace branches
-    // would misbehave with r1hero ≈ 0: cubeAnalyticExit divides by rdL and
-    // would emit NaN, insideTrace would stall at the entry point with no
-    // forward progress.
+    // would misbehave with r1hero ≈ 0: cube/plateAnalyticExit divide by rdL
+    // and would emit NaN, insideTrace would stall with no forward progress.
     if (dot(r1hero, r1hero) >= 1e-4) {
       if (isCube) {
-        let ex = cubeAnalyticExit(h.p, r1hero, cubeIdx);
+        let ex = cubeAnalyticExit(h.p, r1hero, analyticIdx);
+        sharedExit  = ex.pWorld;
+        sharedNBack = ex.nBack;
+      } else if (isPlate) {
+        let ex = plateAnalyticExit(h.p, r1hero, analyticIdx);
         sharedExit  = ex.pWorld;
         sharedNBack = ex.nBack;
       } else {
@@ -630,7 +825,8 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
   //   2. refract into the glass
   //   3. find the back-face exit point + inward normal (skipped in Approx
   //      mode — reuses sharedExit/sharedNBack):
-  //        cube  → cubeAnalyticExit (O(1) slab + rounded-box gradient)
+  //        cube  → cubeAnalyticExit  (O(1) slab + rounded-box gradient)
+  //        plate → plateAnalyticExit (O(1) slab + Newton-refined wavy Z face)
   //        other → insideTrace + sceneNormal finite differences
   //   4. refract out
   //   5. sample photo at the exit UV; TIR → reflection color instead
@@ -652,7 +848,11 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
     var nBack = sharedNBack;
     if (!useHero) {
       if (isCube) {
-        let ex = cubeAnalyticExit(h.p, r1, cubeIdx);
+        let ex = cubeAnalyticExit(h.p, r1, analyticIdx);
+        pExit = ex.pWorld;
+        nBack = ex.nBack;
+      } else if (isPlate) {
+        let ex = plateAnalyticExit(h.p, r1, analyticIdx);
         pExit = ex.pWorld;
         nBack = ex.nBack;
       } else {

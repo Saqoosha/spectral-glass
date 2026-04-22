@@ -30,6 +30,7 @@ const SHAPE_ID: Record<Params['shape'], number> = {
   pill:  0,
   prism: 1,
   cube:  2,
+  plate: 3,
 };
 
 // Must match the WGSL `projection` uniform branches (0 = ortho, 1 = perspective).
@@ -179,11 +180,17 @@ async function main(): Promise<void> {
         rebuildBindGroups(ctx, pl, frameBuf, photoNow, history);
       }
 
+      // Plate forces a square XY face (hy ≡ hx) so pillShort is effectively
+      // unused, and reinterprets edgeR as wave amplitude (no clamp against
+      // halfSize — the wave is a surface displacement, not a rim radius).
+      const isPlate = params.shape === 'plate';
       for (const pill of pills) {
         pill.hx    = params.pillLen   / 2;
-        pill.hy    = params.pillShort / 2;
+        pill.hy    = isPlate ? pill.hx : params.pillShort / 2;
         pill.hz    = params.pillThick / 2;
-        pill.edgeR = Math.min(params.edgeR, pill.hx, pill.hy, pill.hz);
+        pill.edgeR = isPlate
+          ? params.edgeR
+          : Math.min(params.edgeR, pill.hx, pill.hy, pill.hz);
       }
       const historyBlend = resetHistoryFrames > 0 ? 1.0 : 0.2;
       if (resetHistoryFrames > 0) resetHistoryFrames -= 1;
@@ -220,6 +227,11 @@ async function main(): Promise<void> {
         cameraZ,
         projection:         PROJECTION_ID[params.projection],
         debugProxy:         params.debugProxy,
+        // Plate wave params: amp is straight pixels, but the GPU wants an
+        // angular frequency (rad/px) so it can feed sin() directly. UI thinks
+        // in "wavelength in px" (more intuitive) → convert 2π/λ here.
+        waveAmp:            params.waveAmp,
+        waveFreq:           (2 * Math.PI) / Math.max(params.waveWavelength, 1),
         pills,
       });
 
