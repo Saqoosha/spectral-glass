@@ -451,10 +451,21 @@ fn cubeAnalyticExit(roWorld: vec3<f32>, rdWorld: vec3<f32>, pillIdx: u32) -> Cub
 // Detection: compute the plate's local-frame `q = abs(pShift) - h` (same
 // expression sdfWavyPlate uses internally). Each component of `q` is
 // negative inside the slab, zero on the slab's face, positive outside.
-// If two or more components are within HIT_EPS of zero simultaneously, the
-// hit point sits on the intersection of two faces — a crease. Caller
-// routes those pixels through the bg fallback so they blend cleanly with
-// the surrounding silhouette.
+// If two or more components are within the near-boundary band of zero
+// simultaneously, the hit point sits on the intersection of two faces —
+// a crease. Caller routes those pixels through the bg fallback so they
+// blend cleanly with the surrounding silhouette.
+//
+// The threshold is `HIT_EPS / waveLipFactor`, NOT raw `HIT_EPS`. The
+// sphere-trace stops when `sceneSdf < HIT_EPS`, but `sceneSdf` for plate
+// is `box * waveLipFactor` — so the underlying `box` (and therefore each
+// component of `q`) at hit time is bounded by `HIT_EPS / waveLipFactor`,
+// not by `HIT_EPS` directly. At default wave settings the factor is
+// ≈ 0.92 so the difference is negligible (0.27 vs 0.25), but at the
+// slider extremes (waveAmp = 60, waveWavelength = 60) the factor drops
+// to ≈ 0.16 and the band needs to expand to ~1.6 px to actually catch
+// real creases — without this rescaling the detector silently misses
+// rim hits at high wave parameters and the speckles return.
 fn plateCreaseAt(hitWorld: vec3<f32>, pillIdx: u32) -> bool {
   let pill = frame.pills[pillIdx];
   let p    = frame.plateRot * (hitWorld - pill.center);
@@ -464,9 +475,10 @@ fn plateCreaseAt(hitWorld: vec3<f32>, pillIdx: u32) -> bool {
                               * sin(frame.waveFreq * p.y + st * 2.0);
   let pShift = vec3<f32>(p.x, p.y, p.z - waveZ);
   let q      = abs(pShift) - h;
-  let nearX  = i32(abs(q.x) < HIT_EPS);
-  let nearY  = i32(abs(q.y) < HIT_EPS);
-  let nearZ  = i32(abs(q.z) < HIT_EPS);
+  let eps    = HIT_EPS / max(frame.waveLipFactor, 1e-3);
+  let nearX  = i32(abs(q.x) < eps);
+  let nearY  = i32(abs(q.y) < eps);
+  let nearZ  = i32(abs(q.z) < eps);
   return (nearX + nearY + nearZ) >= 2;
 }
 
@@ -574,10 +586,17 @@ fn plateAnalyticExit(roWorld: vec3<f32>, rdWorld: vec3<f32>, pillIdx: u32) -> Cu
     // the plate's XY edges) the flat-Z `tExit` can win the axis race when
     // the true exit is through an X or Y face. Newton then refines pL
     // against a Z surface that doesn't apply at this XY, and pL ends up
-    // outside the plate. Returning a zero-normal sentinel here makes the
-    // wavelength loop's `r2bad` check fall back to the external
-    // reflection — much closer to the visually-correct behaviour at the
-    // crease than sampling the photo at a meaningless reprojected UV.
+    // outside the plate.
+    //
+    // Returning a zero-normal sentinel here makes `refract(r1, vec3(0),
+    // ior)` collapse to (0,0,0) — the wavelength loop's `r2TIR` branch
+    // catches that and falls back to the external reflection (`reflSrc`).
+    // That's the same path real TIR takes, which is acceptable for a
+    // back-exit corner case (the front-side `plateCreaseAt` gate already
+    // catches most of these as bg fallbacks at the front-hit stage; this
+    // post-Newton bail is the secondary defense for back-exit corners
+    // that the front gate can miss). Most plate creases hit the front
+    // gate first, so this path is rarely executed in practice.
     if (any(abs(pL.xy) > h.xy + vec2<f32>(HIT_EPS))) {
       let rotT   = transpose(frame.plateRot);
       let pWorld = rotT * pL + pill.center;
@@ -927,7 +946,7 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
   let shapeId  = i32(frame.shape + 0.5);
   let isCube   = shapeId == 2;
   let isPlate  = shapeId == 3;
-  let hasAnalyticExit = isCube || isPlate;
+  let hasAnalyticExit = isCube || isPlate;  // used by reprojectHit gate below
 
   var analyticIdx: u32 = 0u;
   if (h.ok && isCube) {
@@ -963,8 +982,20 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
     }
     // Same EMA blend as both fs_bg and the hit path — skipping it here would
     // leave a 1-frame temporal discontinuity along the proxy-over-cover halo.
-    let prevMiss  = textureSampleLevel(historyTex, historySmp, uv, 0.0).rgb;
-    let blendMiss = mix(prevMiss, bgFinal, frame.historyBlend);
+    // Variance clamp also runs here: when a previously-hit pixel falls into
+    // the bg fallback (e.g. cube tumbles past so a refraction-coloured
+    // history pixel becomes a miss), the |bgFinal - prevMiss| diff is
+    // large and the clamp adapts α toward 1.0 — the bg sample replaces the
+    // stale refraction in one frame instead of leaving a 5-frame trail.
+    // Without this, silhouette pixels alternating between hit and bg paths
+    // would visibly flicker as 20 % of the wrong-side colour bleeds into
+    // each frame's blend.
+    let prevMiss   = textureSampleLevel(historyTex, historySmp, uv, 0.0).rgb;
+    let diffMiss   = length(bgFinal - prevMiss);
+    let gateMiss   = smoothstep(0.05, 0.15, frame.historyBlend);
+    let mixMiss    = gateMiss * smoothstep(0.05, 0.30, diffMiss);
+    let alphaMiss  = mix(frame.historyBlend, 1.0, mixMiss);
+    let blendMiss  = mix(prevMiss, bgFinal, alphaMiss);
     var bgOut: FsOut;
     bgOut.color   = vec4<f32>(encodeDisplay(blendMiss), 1.0);
     bgOut.history = vec4<f32>(blendMiss, 1.0);
@@ -1028,10 +1059,18 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
 
   // External front-face reflection — used BOTH as TIR fallback and as the
   // per-wavelength reflection color (mixed via per-λ Fresnel below).
-  let refl     = reflect(rd, nFront);
-  let reflUv   = screenUvFromWorld(h.p.xy) + refl.xy * 0.2;
-  let reflSrc  = textureSampleLevel(photoTex, photoSmp, coverUv(reflUv), 0.0).rgb
-              * vec3<f32>(0.85, 0.9, 1.0);
+  // Falls back to the local bg when the reflected UV lands outside the
+  // photo (the sampler is mirror-repeat — see photo.ts — and an OOB
+  // reflUv would mirror back to a visually-unrelated photo region,
+  // matching the UV-OOB symptom we already guard against on the
+  // refraction sample below). Bg is the same colour the miss-path
+  // neighbours render, so silhouette TIR pixels blend cleanly.
+  let refl       = reflect(rd, nFront);
+  let reflUv     = screenUvFromWorld(h.p.xy) + refl.xy * 0.2;
+  let reflCover  = coverUv(reflUv);
+  let reflInBnds = all(reflCover >= vec2<f32>(0.0)) && all(reflCover <= vec2<f32>(1.0));
+  let reflRaw    = textureSampleLevel(photoTex, photoSmp, reflCover, 0.0).rgb;
+  let reflSrc    = select(bg, reflRaw, reflInBnds) * vec3<f32>(0.85, 0.9, 1.0);
 
   // Front-face cosine (angle of incidence). Identical for every wavelength at
   // the front face, so compute once.
@@ -1162,10 +1201,15 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
   // silhouette neighbourhood; substituting black would leave a visible
   // dark speckle. (Without the substitution, NaN burns into history and
   // becomes permanent garbage at that pixel until a scene-change reset.)
-  let raw  = rgbAccum / max(rgbWeight, vec3<f32>(1e-4));
-  let isNaN  = raw != raw;
-  let isHuge = raw > vec3<f32>(8.0);
-  let safe   = select(raw, bg, isNaN | isHuge);
+  let raw    = rgbAccum / max(rgbWeight, vec3<f32>(1e-4));
+  // Whole-pixel decision (any() reduces vec3<bool> to scalar) so a single
+  // bad channel takes the entire pixel to bg — otherwise component-wise
+  // select would replace e.g. just R with bg.r and leave G/B as the raw
+  // (likely also bad) values, producing an off-coloured speckle that's
+  // worse than a clean bg fallback. The `select(_, bg, vec3<bool>(flag))`
+  // pattern broadcasts the scalar back across all three channels.
+  let badPx  = any(raw != raw) || any(raw > vec3<f32>(8.0));
+  let safe   = select(raw, bg, vec3<bool>(badPx));
   let clamped = clamp(safe, vec3<f32>(0.0), vec3<f32>(8.0));
 
   // Silhouette anti-alias by blending toward bg at near-grazing angles.
@@ -1175,11 +1219,25 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
   // even legitimate TIR fallbacks to reflSrc can be uncorrelated with
   // the miss side's plain bg). With TAA off we have no temporal averaging
   // to dilute the discontinuity, so the silhouette flickers as a hard
-  // pixel-wide colour jump. Mixing toward the local bg over a small
-  // grazing-angle band (cosT < 0.15) tapers the edge into a soft
-  // transition that matches the surrounding bg path output. Doesn't
-  // affect interior pixels where cosT is nowhere near zero.
-  let silhouetteMix = smoothstep(0.0, 0.15, cosT);
+  // pixel-wide colour jump.
+  //
+  // Threshold 0.05 is deliberately tight: cosT < 0.05 means incidence
+  // angle > ~87°, the regime where refraction is genuinely meaningless
+  // (Fresnel ≈ 1, the proxy mesh is in pixel-thin coverage of the
+  // actual silhouette). A wider band (we tried 0.15 ≈ 81°) dimmed
+  // legitimate interior pixels of plates tumbling steeply edge-on,
+  // where the entire face is at a grazing-but-fully-hit angle and
+  // the rim Fresnel reflection is the visually-correct answer.
+  //
+  // Gated by historyBlend so paused-scene progressive averaging
+  // (`α = max(1/n, 1/256)` → 0) sees `silhouetteMix = 1` and stays on
+  // the unfaded refraction. Otherwise the bg-tinted output would
+  // accumulate into the converged paused mean and pull silhouettes
+  // toward bg over time — the same failure mode the variance clamp
+  // is also gated against.
+  let silhouetteGate = smoothstep(0.05, 0.15, frame.historyBlend);
+  let silhouetteRaw  = smoothstep(0.0, 0.05, cosT);
+  let silhouetteMix  = mix(1.0, silhouetteRaw, silhouetteGate);
   let outRgb = mix(bg, clamped, silhouetteMix);
 
   // History is stored in rgba16float (linear). Blend in linear space; encode

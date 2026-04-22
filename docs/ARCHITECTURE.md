@@ -231,12 +231,19 @@ for i in 0..N:
   λ      = mix(380, 700, (i + 0.5 + pxJit) / N)
   ior    = cauchyIor(λ, n_d, V_d)
   r1     = refract(-z, nFront, 1/ior)
+  // Entry biased one MIN_STEP inward along r1 — `h.p` lives ON the
+  // surface (within HIT_EPS), and the analytic exits' slab math
+  // (h - roL) / rdL would compute 0/0 = NaN at exact-boundary entries.
+  roEntry = h.p + r1 * MIN_STEP
   if approx:     (pExit, nBack) ← shared back-face trace at heroLambda
-  else if cube:  (pExit, nBack) ← cubeAnalyticExit(h.p, r1, analyticIdx)  // O(1) slab + rounded-box gradient
-  else if plate: (pExit, nBack) ← plateAnalyticExit(h.p, r1, analyticIdx) // O(1) slab + Newton-refined wavy Z face
+  else if cube:  (pExit, nBack) ← cubeAnalyticExit(roEntry, r1, analyticIdx)
+  else if plate: (pExit, nBack) ← plateAnalyticExit(roEntry, r1, analyticIdx)
   else:          pExit = insideTrace(h.p, r1, internalMax), nBack = -sceneNormal(pExit)
   r2     = refract(r1, nBack, ior)
-  L      = TIR ? reflSrc : photo[uv_with_offset(r2)]
+  // Failure-mode routing — see "Failure-mode fallbacks" below.
+  L      = TIR        ? reflSrc :
+           NaN || OOB ? bg      :
+                        photo[uv_with_offset(r2)]
   F_λ    = schlickFresnel(cosT, ior)  // per-wavelength Fresnel
   accum += mix(L, reflSrc, F_λ) * xyzToSrgb(cieXyz(λ))
 ```
@@ -253,14 +260,25 @@ sample and the renormaliser flips a flat-white background to yellow. The
 same off-by-half-stratum also existed at larger N (20 nm overflow at N=8,
 10 nm at N=16), but the artefact was masked by history accumulation.
 
-### TIR fallback
+### Failure-mode fallbacks
 
-When `refract()` returns a zero vector at the back face (total internal
-reflection), the wavelength would otherwise drop out and leave a black hole
-where every λ TIR'd. Instead the loop substitutes the external front-face
-reflection sample for that wavelength, which matches the physics ("total
-reflection" → sample what would reflect off the front) and keeps the spectral
-weighting balanced.
+The wavelength loop has three distinct failure modes for the back-face
+sample, each routed to a different colour:
+
+| Failure | Detection | Fallback | Why |
+|---|---|---|---|
+| Real TIR | `dot(r2, r2) < 1e-4` AND not NaN | `reflSrc` | Physically correct — the wavelength is fully reflected by the front face |
+| NaN r2 | `r2dot != r2dot` (self-comparison catches NaN) | `bg` (local pixel's photo sample) | Renders the same colour as miss-path neighbours so the silhouette stays clean instead of showing a single bright reflection sample |
+| UV out of bounds | `coverUv(uvOff)` not in [0, 1]² | `bg` | The mirror-repeat sampler would otherwise fold a wildly-off UV back to an unrelated photo region (bright photo → white speckle, dark → black) |
+
+The front-face / pre-loop bg fallback gate is similar but covers
+sphere-trace miss, degenerate-gradient `sceneNormal`, and plate
+face-junction creases (`plateCreaseAt`) — all routed to bg for the
+same "matches surrounding bg / silhouette neighbours" reason.
+
+reflSrc itself also gets the OOB check (the reflected UV `h.p.xy +
+refl.xy * 0.2` can land outside the photo) and falls back to bg when
+the reflected sample would otherwise mirror-repeat to garbage.
 
 ### Approx (hero wavelength) mode
 
@@ -286,7 +304,7 @@ Apple Silicon.
 
 ## Testing
 
-Math modules are unit-tested (~45 tests, all pass — exact count drifts with
+Math modules are unit-tested (~55 tests, all pass — exact count drifts with
 each new case, see `bun run test`):
 
 - `cauchyIor` at d-line, monotonicity, `V_d` sensitivity, 1.0 clamp.

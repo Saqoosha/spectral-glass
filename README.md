@@ -168,7 +168,7 @@ docs/
 ```
 
 Math modules in `src/math/` are mirrored 1:1 by functions in
-`src/shaders/dispersion.wgsl` — the vitest suite (~50 tests, exact count
+`src/shaders/dispersion.wgsl` — the vitest suite (~55 tests, exact count
 drifts as cases are added) acts as the reference implementation for the
 shader.
 
