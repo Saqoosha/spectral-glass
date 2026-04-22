@@ -537,6 +537,21 @@ fn plateAnalyticExit(roWorld: vec3<f32>, rdWorld: vec3<f32>, pillIdx: u32) -> Cu
       tExit = tExit - f / dfdt;
       pL    = roL + rdL * tExit;
     }
+    // Validate the refined pL is actually inside the plate's XY extent.
+    // The slab pre-pick used the FLAT z slab (`±h.z`), but the real plate
+    // surface is `±h.z + waveZ(x, y)`; at corner cases (grazing rays at
+    // the plate's XY edges) the flat-Z `tExit` can win the axis race when
+    // the true exit is through an X or Y face. Newton then refines pL
+    // against a Z surface that doesn't apply at this XY, and pL ends up
+    // outside the plate. Returning a zero-normal sentinel here makes the
+    // wavelength loop's `r2bad` check fall back to the external
+    // reflection — much closer to the visually-correct behaviour at the
+    // crease than sampling the photo at a meaningless reprojected UV.
+    if (any(abs(pL.xy) > h.xy + vec2<f32>(HIT_EPS))) {
+      let rotT   = transpose(frame.plateRot);
+      let pWorld = rotT * pL + pill.center;
+      return CubeExit(pWorld, vec3<f32>(0.0));
+    }
     // Rebuild waveZ gradient at the refined pL for the normal.
     let sx = sin(k * pL.x + phase);
     let sy = sin(k * pL.y + phase);
@@ -948,12 +963,25 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
     // would misbehave with r1hero ≈ 0: cube/plateAnalyticExit divide by rdL
     // and would emit NaN, insideTrace would stall with no forward progress.
     if (dot(r1hero, r1hero) >= 1e-4) {
+      // Bias the entry point inward by one MIN_STEP along the refracted ray.
+      // The raw front hit `h.p` lives ON the surface (within HIT_EPS), so
+      // the slab intersection in the analytic exits computes
+      // `(±h - roL) / rdL` with `±h - roL ≈ 0` when ro is right at the
+      // boundary. That divides to NaN, and WGSL's `<=` against NaN is
+      // silently false — the axis selection then picks the wrong slab,
+      // sending Newton chasing a Z exit when the ray actually leaves
+      // through X / Y. The wrong exit point projects to a refracted UV
+      // somewhere unrelated, the mirror-repeat photo sampler returns
+      // whatever colour happens to live at that wrong UV (white if it
+      // lands on bright photo content, black if dark), and the result
+      // shows as a single-pixel speckle along plate/cube internal edges.
+      let roEntry = h.p + r1hero * MIN_STEP;
       if (isCube) {
-        let ex = cubeAnalyticExit(h.p, r1hero, analyticIdx);
+        let ex = cubeAnalyticExit(roEntry, r1hero, analyticIdx);
         sharedExit  = ex.pWorld;
         sharedNBack = ex.nBack;
       } else if (isPlate) {
-        let ex = plateAnalyticExit(h.p, r1hero, analyticIdx);
+        let ex = plateAnalyticExit(roEntry, r1hero, analyticIdx);
         sharedExit  = ex.pWorld;
         sharedNBack = ex.nBack;
       } else {
@@ -1018,12 +1046,16 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
     var pExit = sharedExit;
     var nBack = sharedNBack;
     if (!useHero) {
+      // Same entry-bias trick as the hero branch above — see that block
+      // for the full rationale (boundary `h.p` → 0/0 in slab intersection
+      // → silently-wrong axis selection → speckle dots along edges).
+      let roEntry = h.p + r1 * MIN_STEP;
       if (isCube) {
-        let ex = cubeAnalyticExit(h.p, r1, analyticIdx);
+        let ex = cubeAnalyticExit(roEntry, r1, analyticIdx);
         pExit = ex.pWorld;
         nBack = ex.nBack;
       } else if (isPlate) {
-        let ex = plateAnalyticExit(h.p, r1, analyticIdx);
+        let ex = plateAnalyticExit(roEntry, r1, analyticIdx);
         pExit = ex.pWorld;
         nBack = ex.nBack;
       } else {
