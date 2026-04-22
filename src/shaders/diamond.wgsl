@@ -145,12 +145,12 @@ fn hitDiamondPillIdx(p: vec3<f32>) -> u32 {
 // this proxy has.
 //
 // Callers (vs_proxy in dispersion.wgsl) are expected to bound-check
-// `vi < DIAMOND_PROXY_VERT_COUNT` (138) before calling. The vertex budget is
-// enforced at the draw call (see src/webgpu/pipeline.ts) and by the
-// maxVerts guard at the top of vs_proxy — both read the same
-// DIAMOND_PROXY_VERT_COUNT constant so a Phase B mesh change only needs
-// this function + DIAMOND_PROXY_VERT_COUNT updated on the WGSL side; the
-// draw count picks it up automatically.
+// `vi < DIAMOND_PROXY_VERT_COUNT` (138) before calling. The vertex budget
+// is enforced at the draw call (pipeline.ts) and by the maxVerts guard at
+// the top of vs_proxy — both read the same DIAMOND_PROXY_VERT_COUNT
+// constant injected by src/math/diamond.ts. A mesh-topology change
+// touches this function here AND `DIAMOND_PROXY_TRI_COUNT` in
+// src/math/diamond.ts; the draw count + maxVerts guard follow automatically.
 fn diamondProxyVertex(vi: u32, d: f32) -> vec3<f32> {
   let triIdx    = vi / 3u;        // 0..45
   let vertInTri = vi % 3u;        // 0..2

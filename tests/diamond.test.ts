@@ -191,6 +191,23 @@ describe('diamond geometry (Tolkowsky ideal)', () => {
     expect(planes.pavilion.offset).toBeCloseTo(expected, 8);
   });
 
+  it('star plane passes through a table vertex on the mirror boundary (φ=π/8)', () => {
+    // Star anchor = (R_TABLE_VERTEX·cos(π/8), R_TABLE_VERTEX·sin(π/8), H_TOP).
+    // Normal = (cos(π/8)·sin(22°), sin(π/8)·sin(22°), cos(22°)).
+    // Offset = dot(anchor, normal), which simplifies to
+    //   R_TABLE_VERTEX · sin(22°) + H_TOP · cos(22°)
+    // (the cos²+sin² collapses the in-plane dot to R_TABLE_VERTEX · sin 22°).
+    //
+    // This pins the star-plane anchor on R_TABLE_VERTEX specifically — catches
+    // a silent revert from flat-to-flat TABLE_RATIO convention back to vertex-
+    // to-vertex, which would otherwise pass every other plane test because
+    // only the star plane uses R_TABLE_VERTEX in its anchor.
+    const { R_TABLE_VERTEX, H_TOP, planes } = DIAMOND_INTERNALS;
+    const alpha    = 22.0 * Math.PI / 180;
+    const expected = R_TABLE_VERTEX * Math.sin(alpha) + H_TOP * Math.cos(alpha);
+    expect(planes.star.offset).toBeCloseTo(expected, 8);
+  });
+
   it('slider bounds span a reasonable visible range', () => {
     expect(DIAMOND_SIZE_MIN).toBeGreaterThan(0);
     expect(DIAMOND_SIZE_MAX).toBeGreaterThan(DIAMOND_SIZE_MIN);

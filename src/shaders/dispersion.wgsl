@@ -247,14 +247,21 @@ fn sceneSdf(p: vec3<f32>) -> f32 {
 // times the max half-side, doubled) is the longest possible chord; for pill
 // and prism the 3D diagonal of the AABB is an upper bound too.
 //
-// Diamond: main.ts writes `pill.hx/hy/hz = diamondSize/2` for diamond
-// instances, so `length(halfSize)*2 = √3·diamondSize ≈ 1.73·d`. The actual
-// diamond's longest interior chord is 2·R_GIRDLE = diameter (between
-// opposite girdle points), comfortably smaller than the 1.73·d bound. If
-// main.ts ever stops writing diamond halfSize this way the cap could drop
-// below the true max chord and clip the pavilion's deepest rays — keep the
-// pill.halfSize initialisation in sync with `params.diamondSize`.
+// Diamond takes a shape-specific path: its halfSize is coincidental (main.ts
+// writes `pill.hx/hy/hz = diamondSize/2` so the drag hit-test works, but the
+// SDF reads `frame.diamondSize` directly). Using the diamondSize-derived
+// upper bound here decouples the internal-trace cap from the pills array,
+// so a future refactor that stops initialising halfSize for diamond can't
+// silently clip the pavilion's deepest rays.
 fn maxInternalPath() -> f32 {
+  let shapeId = i32(frame.shape + 0.5);
+  if (shapeId == 4) {
+    // Diamond: true longest interior chord is 2·R_GIRDLE = diameter
+    // (between opposite girdle points). Doubled again for safety covers
+    // multi-bounce paths Phase B will eventually add; `* 2.0` is what
+    // cube/pill/prism/plate also use (2× the half-size = full extent).
+    return max(frame.diamondSize * 2.0, 32.0);
+  }
   let count = min(u32(frame.pillCount), MAX_PILLS);
   var m: f32 = 0.0;
   for (var i: u32 = 0u; i < count; i = i + 1u) {
@@ -692,9 +699,11 @@ fn hash21(p: vec2<f32>) -> f32 {
 // rasterizer produces fragments for the exact projected silhouette of the
 // proxy mesh, so tight coverage on rotated cubes is automatic.
 
-// Unit cube, 36 verts, 12 tris, CCW outward winding (so `cullMode: 'back'`
-// leaves one invocation per covered pixel).
-const CUBE_VERTS: array<vec3<f32>, 36> = array<vec3<f32>, 36>(
+// Unit cube, 36 verts (= CUBE_PROXY_VERT_COUNT from src/math/diamond.ts),
+// 12 tris, CCW outward winding (so `cullMode: 'back'` leaves one invocation
+// per covered pixel). The array size must match CUBE_PROXY_VERT_COUNT, which
+// the pipeline.ts draw call and the maxVerts guard below also read from.
+const CUBE_VERTS: array<vec3<f32>, CUBE_PROXY_VERT_COUNT> = array<vec3<f32>, CUBE_PROXY_VERT_COUNT>(
   // +X face (CCW outward: swap V1,V2 vs the other faces' pattern because the
   // outward normal flips sign of cross(E1, E2) when the face is on the +X side)
   vec3<f32>( 1.0,-1.0,-1.0), vec3<f32>( 1.0, 1.0, 1.0), vec3<f32>( 1.0,-1.0, 1.0),
@@ -853,15 +862,16 @@ fn vs_proxy(
   let pill    = frame.pills[ii];
   let shapeId = i32(frame.shape + 0.5);
 
-  // Per-shape vertex budget: 36 for cube/pill/prism/plate (CUBE_VERTS array
-  // size), DIAMOND_PROXY_VERT_COUNT (138) for diamond. Reading the diamond
-  // count from the TS-injected const (single source of truth shared with
-  // the host draw call in pipeline.ts) means a Phase B mesh change only
-  // needs updates on the TS side — the guard picks up the new value
-  // automatically. The guard prevents CUBE_VERTS out-of-bounds access for
-  // non-diamond shapes when vi ≥ 36; past DIAMOND_PROXY_VERT_COUNT the
-  // diamond branch itself no longer has a valid vertex, so clip early.
-  let maxVerts = select(36u, DIAMOND_PROXY_VERT_COUNT, shapeId == 4);
+  // Per-shape vertex budget: CUBE_PROXY_VERT_COUNT for cube/pill/prism/plate
+  // (the CUBE_VERTS array size above), DIAMOND_PROXY_VERT_COUNT for diamond.
+  // Both constants are injected from src/math/diamond.ts so the draw call
+  // (pipeline.ts), this guard, and the CUBE_VERTS array literal all track
+  // the same TS numbers. A Phase B mesh change updates the TS constants
+  // (or, for diamond, the mesh body in diamond.wgsl) — the guard and draw
+  // count follow automatically. The guard prevents CUBE_VERTS out-of-bounds
+  // access for non-diamond shapes when vi ≥ CUBE_PROXY_VERT_COUNT; past
+  // DIAMOND_PROXY_VERT_COUNT the diamond branch has no valid vertex either.
+  let maxVerts = select(CUBE_PROXY_VERT_COUNT, DIAMOND_PROXY_VERT_COUNT, shapeId == 4);
   if (vi >= maxVerts) {
     return vec4<f32>(2.0, 2.0, 0.5, 1.0);
   }
@@ -880,12 +890,13 @@ fn vs_proxy(
                            pill.halfSize.z + frame.waveAmp);
     corner = transpose(frame.plateRot) * (CUBE_VERTS[vi] * extent);
   } else if (shapeId == 4) {
-    // Diamond: exact convex-hull proxy mesh (30 triangles, 90 vertices)
-    // synthesized from Tolkowsky constants by diamondProxyVertex in
-    // src/shaders/diamond.wgsl. The split keeps the geometry details next
-    // to sdfDiamond where Phase B's trace work will also land.
+    // Diamond: exact convex-hull proxy mesh (DIAMOND_PROXY_VERT_COUNT
+    // vertices = 46 triangles — see diamondProxyVertex in diamond.wgsl
+    // for the topology breakdown). The split keeps the geometry details
+    // next to sdfDiamond where future diamond-only trace work can land.
     //
-    // vi < 90 is guaranteed by the maxVerts guard at the top of vs_proxy.
+    // vi < DIAMOND_PROXY_VERT_COUNT is guaranteed by the maxVerts guard
+    // at the top of vs_proxy.
     let local = diamondProxyVertex(vi, frame.diamondSize);
     corner    = transpose(frame.diamondRot) * local;
   } else {

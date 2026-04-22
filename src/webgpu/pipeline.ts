@@ -5,15 +5,19 @@ import type { Intermediate } from './postprocess';
 import vsSrc from '../shaders/fullscreen.wgsl?raw';
 import fsSrc from '../shaders/dispersion.wgsl?raw';
 import diamondSrc from '../shaders/diamond.wgsl?raw';
-import { diamondWgslConstants, DIAMOND_PROXY_VERT_COUNT } from '../math/diamond';
+import {
+  diamondWgslConstants,
+  CUBE_PROXY_VERT_COUNT,
+  DIAMOND_PROXY_VERT_COUNT,
+} from '../math/diamond';
 
-// Cube-topology vertex count (pill/prism/cube/plate all use the 12-triangle
-// unit-cube proxy defined in dispersion.wgsl's CUBE_VERTS array).
-const CUBE_PROXY_VERT_COUNT = 36;
 // Draw-call vertex count — max across all shapes, so one draw covers both
-// the cube topology (non-diamond) AND the diamond's convex-hull mesh. The
-// maxVerts guard at the top of vs_proxy (src/shaders/dispersion.wgsl) clips
-// the upper range for non-diamond shapes to a degenerate off-screen vertex.
+// the cube topology (pill/prism/cube/plate) AND the diamond's convex-hull
+// mesh. The maxVerts guard at the top of vs_proxy (src/shaders/dispersion.wgsl)
+// clips the upper range for non-diamond shapes to a degenerate off-screen
+// vertex. Both per-shape counts are injected into WGSL via
+// diamondWgslConstants() so the CUBE_VERTS array size + the maxVerts guard
+// + this draw count all read from the same TS numbers.
 const PROXY_VERTS_PER_INSTANCE = Math.max(CUBE_PROXY_VERT_COUNT, DIAMOND_PROXY_VERT_COUNT);
 
 export type Pipeline = {

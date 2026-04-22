@@ -12,10 +12,10 @@ refraction shader only runs on fragments the proxy actually covers.
 │                                                                      │
 │  1. resize canvas + history + post-intermediate if needed            │
 │  2. push params → pills (hx/hy/hz/edgeR)                             │
-│  3. writeFrame → uniform buffer (544 B: scalars + 4×mat3 + pills)    │
+│  3. writeFrame → uniform buffer (656 B: scalars + 6×mat3 + pills)    │
 │  4. scene pass (writes → intermediate(rgba16f) + history[write]):    │
 │     a. bg sub-pass: fullscreen triangle → fs_bg (photo + history)    │
-│     b. proxy sub-pass: instanced 3D cube mesh → fs_main              │
+│     b. proxy sub-pass: instanced 3D proxy mesh → fs_main             │
 │          per-fragment camera ray (ortho OR perspective)              │
 │          sphere-trace scene SDF                                      │
 │          if miss: return bg (over-covered proxy fragment)            │
@@ -45,16 +45,24 @@ no per-frame bind group allocation.
 
 ### Proxy mesh
 
-`vs_proxy` emits a 36-vertex unit cube (12 tris, CCW-outward winding) per
-pill, scaled to `halfSize + edgeR`. For `shape == cube` the corners are
-transformed by `transpose(cubeRot)` so the rasterised silhouette matches
-the shader's world-space cube exactly — no √3 bounding-box slack. Plates
-use the same trick with `transpose(plateRot)` and extend the Z half-extent
-by `waveAmp` so the rippling surface never pokes through the proxy. Pill
-and prism are axis-aligned in world space, so their AABB cube proxy already
-covers the shape tightly. Back-face culling (`frontFace: 'cw'` because our
-Y-flipped projection inverts winding from 3D to NDC) leaves one fragment
-invocation per covered pixel.
+`vs_proxy` emits a per-shape proxy mesh — pill/prism/cube/plate use a
+`CUBE_PROXY_VERT_COUNT`-vertex unit cube (36 verts, 12 tris, CCW-outward
+winding) scaled to `halfSize + edgeR`; diamond uses a
+`DIAMOND_PROXY_VERT_COUNT`-vertex exact convex hull (138 verts, 46 tris)
+synthesized from Tolkowsky constants in `diamondProxyVertex` (see
+`src/shaders/diamond.wgsl`). The draw call issues
+`max(CUBE_PROXY_VERT_COUNT, DIAMOND_PROXY_VERT_COUNT)` vertices per
+instance; the `maxVerts` guard at the top of `vs_proxy` clips the upper
+range for non-diamond shapes to an off-screen degenerate position.
+For `shape == cube` / `plate` / `diamond` the corners are transformed by
+`transpose(cubeRot)` / `transpose(plateRot)` / `transpose(diamondRot)`
+so the rasterised silhouette matches the shader's world-space shape
+exactly. Plate extends the Z half-extent by `waveAmp` so the rippling
+surface never pokes through. Pill and prism are axis-aligned in world
+space, so their AABB cube proxy already covers the shape tightly.
+Back-face culling (`frontFace: 'cw'` because our Y-flipped projection
+inverts winding from 3D to NDC) leaves one fragment invocation per
+covered pixel.
 
 ### Camera
 
@@ -121,14 +129,15 @@ Uniform size is fixed — pills beyond `pillCount` are zeros.
   skipped whenever `params.paused` is true. Drives the rotation matrices
   and the plate's wave phase. Decoupled from `time` so "Stop the world"
   freezes motion without freezing AA convergence.
-- `cubeRot` / `plateRot` are the current frame's rotations (rz·rx for cube,
-  rx·ry for plate), precomputed on the host from `sceneTime` so the shader
+- `cubeRot` / `plateRot` / `diamondRot` are the current frame's rotations
+  (rz·rx for cube, rx·ry for plate, Rx·Ry for diamond with a fixed 20°
+  forward tilt), precomputed on the host from `sceneTime` so the shader
   does one mat-vec instead of multiple cos/sin in every SDF evaluation.
-  `cubeRotPrev` / `plateRotPrev` are the same matrices computed from the
-  previous frame's `sceneTime` — feed `reprojectHit` for TAA motion-vector
-  history reads. When paused they equal the current matrices, so the
-  reprojection collapses to identity and history reads land on the pixel
-  centre (no iterated bilinear blur).
+  `cubeRotPrev` / `plateRotPrev` / `diamondRotPrev` are the same matrices
+  computed from the previous frame's `sceneTime` — feed `reprojectHit`
+  for TAA motion-vector history reads. When paused they equal the
+  current matrices, so the reprojection collapses to identity and history
+  reads land on the pixel centre (no iterated bilinear blur).
 - `taaEnabled` toggles temporal antialiasing. When on, `fs_main` jitters
   the primary ray by a per-pixel hash within ±0.5 px, and reads history at
   `fragCoord + (projected_prev_world − projected_curr_world)` — jitter
@@ -243,7 +252,7 @@ keeps the output neutral for any `N`.
 
 ## SDFs and sphere tracing
 
-Four shapes. `sceneSdf` dispatches on the `shape` uniform:
+Five shapes. `sceneSdf` dispatches on the `shape` uniform:
 
 - **Pill** — 2D stadium silhouette in XY (`roundedBox` shrunk by `edgeR`, then
   rounded by the shortest shrunk half-axis), extruded into Z with the same
@@ -269,6 +278,16 @@ Four shapes. `sceneSdf` dispatches on the `shape` uniform:
   ratio chosen as coprime small integers (2:3) so the combined orientation
   takes ~63 s to repeat — long enough to read as non-looping in practice;
   see `src/math/plate.ts` for the explicit period derivation).
+- **Diamond** — round brilliant cut as a convex polytope. 58 facets
+  collapse to 7 distance terms via D_8 (octagonal) symmetry folding, then
+  `max(...)` of the half-space distances gives the SDF. Tolkowsky plane
+  coefficients (bezel, star, upper/lower half, pavilion main + table +
+  girdle cylinder) are derived in `src/math/diamond.ts` and injected
+  into the shader as `const` declarations. Rotation is `Rx·Ry` (fixed
+  20° forward tilt + vertical Y-axis spin) precomputed as `diamondRot`
+  on the host — same uniform pattern as cube/plate. SDF code lives in
+  `src/shaders/diamond.wgsl` alongside `hitDiamondPillIdx` and the
+  `diamondProxyVertex` mesh synthesiser.
 
 Sphere trace starts from a per-pixel ray origin and direction (see Camera
 above), marches with `HIT_EPS = 0.25` and `MIN_STEP = 0.5`. For pill and

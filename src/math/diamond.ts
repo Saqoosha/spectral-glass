@@ -250,9 +250,11 @@ function emitPlaneConst(prefix: string, p: FacetPlane): string {
  * Proxy mesh triangle/vertex count — the single source of truth that both
  * the host draw call (src/webgpu/pipeline.ts) and the WGSL proxy vertex
  * shader (dispersion.wgsl's `maxVerts` guard + diamond.wgsl's
- * `diamondProxyVertex` bound check) read from. Keeping these as exports
- * rather than magic numbers means a Phase B mesh change only needs edits
- * on the shader side — TS picks up the right draw count automatically.
+ * `diamondProxyVertex` bound check) read from. A mesh-topology change
+ * touches two places: `DIAMOND_PROXY_TRI_COUNT` below AND the
+ * `diamondProxyVertex` body in src/shaders/diamond.wgsl. The draw count
+ * (pipeline.ts) and WGSL `maxVerts` guard read from the TS constant, so
+ * they auto-follow — no drift risk.
  *
  * Mesh topology: 6 table fan + 16 crown trapezoids + 16 girdle band
  * (2 rings × 8 quads, covers the cylindrical girdle thickness that a
@@ -260,6 +262,16 @@ function emitPlaneConst(prefix: string, p: FacetPlane): string {
  */
 export const DIAMOND_PROXY_TRI_COUNT  = 46;
 export const DIAMOND_PROXY_VERT_COUNT = DIAMOND_PROXY_TRI_COUNT * 3;  // 138
+
+/**
+ * Cube-topology proxy vertex count — 12 triangles × 3 = 36. Shared across
+ * pill/prism/cube/plate via the `CUBE_VERTS` array in dispersion.wgsl.
+ * Exported alongside the diamond counts so every "proxy vertex budget"
+ * literal in the project has one canonical definition; a future change to
+ * the cube mesh updates three consumers (pipeline.ts draw call, WGSL
+ * array size, WGSL maxVerts guard) from one place.
+ */
+export const CUBE_PROXY_VERT_COUNT = 36;
 
 /**
  * WGSL `const` declarations for the diamond SDF plane table. Prepended to the
@@ -303,6 +315,7 @@ export function diamondWgslConstants(): string {
     `const DIAMOND_R_GIRDLE:          f32 = ${fwgsl(R_GIRDLE)};`,
     `const DIAMOND_R_TABLE_VERTEX:    f32 = ${fwgsl(R_TABLE_VERTEX)};`,
     `const DIAMOND_GIRDLE_R_CIRC:     f32 = ${fwgsl(girdleRCirc)};`,
+    `const CUBE_PROXY_VERT_COUNT:     u32 = ${CUBE_PROXY_VERT_COUNT}u;`,
     `const DIAMOND_PROXY_VERT_COUNT:  u32 = ${DIAMOND_PROXY_VERT_COUNT}u;`,
     emitPlaneConst('DIAMOND_BEZEL',      BEZEL_PLANE),
     emitPlaneConst('DIAMOND_STAR',       STAR_PLANE),
@@ -318,7 +331,15 @@ export function diamondWgslConstants(): string {
 
 /** Internal dimensions exposed so tests can cross-check numerics without
  *  re-deriving them. Not used by the render path. */
-export const DIAMOND_INTERNALS = {
+/**
+ * Internal values exported strictly for regression tests (diamond.test.ts).
+ * Not a stable API — fields may appear or disappear as the geometry evolves.
+ *
+ * `Object.freeze` is applied at both levels so a bad test can't mutate the
+ * shared object and poison later tests in the same process. `as const` is
+ * the compile-time readonly; the runtime freeze is belt-and-suspenders.
+ */
+const DIAMOND_INTERNALS_MUT = {
   R_GIRDLE,
   R_TABLE_VERTEX,
   R_TABLE_APOTHEM,
@@ -333,11 +354,12 @@ export const DIAMOND_INTERNALS = {
   // exported so tests can pin `R_CIRC = R_GIRDLE / cos(π/8)` and the
   // circumscribing-octagon slack math doesn't drift silently.
   GIRDLE_R_CIRC: R_GIRDLE / Math.cos(Math.PI / 8),
-  planes: {
+  planes: Object.freeze({
     bezel:      BEZEL_PLANE,
     star:       STAR_PLANE,
     upperHalf:  UPPER_HALF_PLANE,
     lowerHalf:  LOWER_HALF_PLANE,
     pavilion:   PAVILION_PLANE,
-  },
+  }),
 } as const;
+export const DIAMOND_INTERNALS = Object.freeze(DIAMOND_INTERNALS_MUT);
