@@ -57,31 +57,33 @@ const LOWER_HALF_ANGLE_DEG = 43.0;
  *  within GIA's acceptable range for commercial cuts. */
 const GIRDLE_THICKNESS_RATIO = 0.02;
 
-// Angular positions (azimuthal) of each facet class's centreline. Per the
-// GIA brilliant-cut anatomy:
-//   - Table has 8 vertices (at φ = π/8 + k·π/4) and 8 edges (at k·π/4).
-//   - BEZEL kites radiate OUT from each table vertex, so their centreline
-//     runs through the table vertex. φ_bezel = π/8.
-//   - STAR triangles sit DIRECTLY OUTSIDE each table edge (base ON the
-//     table edge), so their centreline runs through the edge midpoint.
-//     φ_star = 0.
-//   - PAVILION main facets sit directly beneath the BEZEL kites (they
-//     share the crown-side plane azimuth), so φ_pavilion = φ_bezel = π/8.
-//   - UPPER / LOWER GIRDLE HALVES flank the bezels and pavilion mains
-//     at ±π/16 from each; a single representative in the fundamental
-//     wedge sits at φ = π/16.
+// Angular positions (azimuthal) of each facet class's centreline. Matches
+// the standard 96-index-wheel layout for a round brilliant cut (pavilion
+// mains on indices 0-12-24-…-84, stars on 6-18-30-…-90 — the stars staggered
+// between the mains):
 //
-// After the 1/16 D_8 fold the fundamental wedge is [0, π/8]. The bezel and
-// pavilion main centrelines land ON the wedge's upper boundary (φ = π/8,
-// the mirror line between adjacent octants). The star centreline lands on
-// the lower boundary (φ = 0, the mirror line within an octant). Upper /
-// lower halves sit mid-wedge. Placing every facet on a mirror line (or
-// midway between them) means each plane's outward normal is symmetric
-// under the fold, so the fold never evaluates a plane at a point it
-// doesn't cover.
-const PHI_BEZEL      = Math.PI / 8;
-const PHI_PAVILION   = Math.PI / 8;
-const PHI_STAR       = 0;
+//   - Table orientation: its 8 VERTICES sit at φ = k·π/4 (= the bezel /
+//     pavilion-main azimuths), its 8 EDGES sit between vertices at
+//     φ = π/8 + k·π/4 (= the star azimuths).
+//   - BEZEL kite: top corner at a TABLE VERTEX, bottom corner on the
+//     girdle at the same azimuth. Centreline φ_bezel = 0.
+//   - PAVILION main: aligned with the bezel above it — same azimuth,
+//     same "bezel point to bezel point" GIA measurement. φ_pavilion = 0.
+//   - STAR triangle: base spans a TABLE EDGE (between two adjacent
+//     vertices at φ = 0 and φ = π/4). Centreline φ_star = π/8, midway
+//     between those vertices — the edge midpoint direction.
+//   - UPPER / LOWER GIRDLE HALVES flank the mains at ±π/16; a single
+//     representative in the fundamental wedge sits at φ = π/16.
+//
+// After the 1/16 D_8 fold the fundamental wedge is [0, π/8]. Bezel and
+// pavilion land ON the lower wedge boundary (φ = 0, the mirror line);
+// star lands on the upper boundary (φ = π/8). Upper / lower halves sit
+// mid-wedge. Placing every facet on a mirror line (or midway between)
+// means each plane's outward normal is symmetric under the fold, so
+// the fold never evaluates a plane at a point it doesn't cover.
+const PHI_BEZEL      = 0;
+const PHI_PAVILION   = 0;
+const PHI_STAR       = Math.PI / 8;
 const PHI_UPPER_HALF = Math.PI / 16;
 const PHI_LOWER_HALF = Math.PI / 16;
 
@@ -173,22 +175,24 @@ function planeFromAngles(
 // See the φ_* constants above for the geometric rationale behind each
 // facet's centreline orientation.
 
-/** Bezel (crown main) — the kite radiates out from a table VERTEX. Plane
- *  passes through the girdle-top POINT at the same azimuth (φ = π/8); by
- *  H_CROWN's derivation it also passes through the table vertex itself. */
+/** Bezel (crown main) — kite axis runs from a TABLE VERTEX at φ = 0
+ *  (R_TABLE_VERTEX, 0, H_TOP) down to a GIRDLE POINT at the same azimuth
+ *  (R_GIRDLE, 0, H_GIRDLE_HALF). By H_CROWN's derivation the plane passes
+ *  through both anchor choices — we pick the girdle point. */
 const BEZEL_PLANE:   FacetPlane = planeFromAngles(PHI_BEZEL,   CROWN_ANGLE,      +1,
-  [R_GIRDLE * Math.cos(PHI_BEZEL), R_GIRDLE * Math.sin(PHI_BEZEL), H_GIRDLE_HALF]);
+  [R_GIRDLE, 0, H_GIRDLE_HALF]);
 
 /** Star — its BASE lies on a TABLE EDGE (the segment between two adjacent
- *  table vertices at φ = ±π/8 around the edge midpoint at φ = 0). With the
- *  plane's normal having no Y component (symmetric about φ = 0), anchoring
- *  at the edge midpoint (R_TABLE_APOTHEM, 0, H_TOP) is equivalent to
- *  anchoring at either table vertex — the Y offsets cancel. */
+ *  table vertices at φ = 0 and φ = π/4). The star plane is centred on the
+ *  edge midpoint direction (φ = π/8). Anchor at the edge midpoint itself:
+ *  (R_TABLE_APOTHEM·cos(π/8), R_TABLE_APOTHEM·sin(π/8), H_TOP). The cos²+
+ *  sin² collapse in planeFromAngles' offset computation reduces this to
+ *  R_TABLE_APOTHEM · sin(α_star) + H_TOP · cos(α_star). */
 const STAR_PLANE:    FacetPlane = planeFromAngles(PHI_STAR,    STAR_ANGLE,       +1,
-  [R_TABLE_APOTHEM, 0, H_TOP]);
+  [R_TABLE_APOTHEM * Math.cos(PHI_STAR), R_TABLE_APOTHEM * Math.sin(PHI_STAR), H_TOP]);
 
 /** Upper half — anchored at the girdle-top on the facet's centreline
- *  (φ=π/16, halfway between a star and a bezel). This places the facet's
+ *  (φ=π/16, halfway between a bezel and a star). This places the facet's
  *  lower edge on the girdle band. */
 const UPPER_HALF_PLANE: FacetPlane = planeFromAngles(PHI_UPPER_HALF, UPPER_HALF_ANGLE, +1,
   [R_GIRDLE * Math.cos(PHI_UPPER_HALF), R_GIRDLE * Math.sin(PHI_UPPER_HALF), H_GIRDLE_HALF]);
@@ -198,13 +202,13 @@ const UPPER_HALF_PLANE: FacetPlane = planeFromAngles(PHI_UPPER_HALF, UPPER_HALF_
 const LOWER_HALF_PLANE: FacetPlane = planeFromAngles(PHI_LOWER_HALF, LOWER_HALF_ANGLE, -1,
   [R_GIRDLE * Math.cos(PHI_LOWER_HALF), R_GIRDLE * Math.sin(PHI_LOWER_HALF), -H_GIRDLE_HALF]);
 
-/** Pavilion main — shares the bezel's azimuth (φ = π/8, table vertex
- *  direction) as is standard for a round brilliant. The plane passes
+/** Pavilion main — shares the bezel's azimuth (φ = 0, through the table
+ *  vertex above) as is standard for a round brilliant. The plane passes
  *  through the girdle-bottom POINT and converges toward the culet at
  *  (0, 0, H_BOT); by H_PAVILION = R_GIRDLE · tan(PAVILION_ANGLE) the plane
  *  exactly hits the culet too. */
 const PAVILION_PLANE: FacetPlane = planeFromAngles(PHI_PAVILION, PAVILION_ANGLE,   -1,
-  [R_GIRDLE * Math.cos(PHI_PAVILION), R_GIRDLE * Math.sin(PHI_PAVILION), -H_GIRDLE_HALF]);
+  [R_GIRDLE, 0, -H_GIRDLE_HALF]);
 
 // ---------- rotation uniform ----------
 

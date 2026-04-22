@@ -157,12 +157,14 @@ describe('diamond geometry (Tolkowsky ideal)', () => {
     }
   });
 
-  it('star normal has no Y component (centred at φ=0, on the table edge)', () => {
-    // Bezel and pavilion sit at φ=π/8 (through a table vertex), so their
-    // normals DO have non-zero Y. Star is the only facet class whose
-    // centreline is on the φ=0 mirror — its normal Y component collapses
-    // because sin(0) = 0.
-    expect(DIAMOND_INTERNALS.planes.star.ny).toBeCloseTo(0, 10);
+  it('bezel + pavilion normals have no Y component (centred at φ=0)', () => {
+    // Bezel and pavilion axes run through a table VERTEX at φ = 0 (on
+    // the +X axis). The Y component of their normals is
+    // sin(φ)·sin(α) = 0 because sin(0) = 0. Star sits at φ = π/8 (the
+    // table edge direction between two adjacent vertices), so its
+    // normal DOES have a non-zero Y.
+    expect(DIAMOND_INTERNALS.planes.bezel.ny).toBeCloseTo(0, 10);
+    expect(DIAMOND_INTERNALS.planes.pavilion.ny).toBeCloseTo(0, 10);
   });
 
   it('crown normals have +Z, pavilion normals have -Z', () => {
@@ -173,39 +175,40 @@ describe('diamond geometry (Tolkowsky ideal)', () => {
     expect(DIAMOND_INTERNALS.planes.pavilion.nz).toBeLessThan(0);
   });
 
-  it('bezel plane passes through the girdle-top rim at φ=π/8', () => {
-    // Bezel is centred at the table-vertex direction φ = π/8 (where the kite
-    // radiates from). Plane anchor is the girdle-top point at that same
-    // azimuth: (R_GIRDLE·cos(π/8), R_GIRDLE·sin(π/8), +H_GIRDLE_HALF).
-    // Because cos²(π/8) + sin²(π/8) = 1, dot(anchor, normal) collapses to
-    // the clean formula R_GIRDLE · sin(α) + H_GIRDLE_HALF · cos(α).
+  it('bezel plane passes through the girdle-top rim at φ=0', () => {
+    // Bezel axis runs along φ = 0 (through a table VERTEX at (R_TABLE_VERTEX,
+    // 0, H_TOP) down to a girdle POINT at (R_GIRDLE, 0, +H_GIRDLE_HALF)).
+    // Anchor here is the girdle point; offset = dot with normal
+    // (sin(34.5°), 0, cos(34.5°)).
     const { R_GIRDLE, planes } = DIAMOND_INTERNALS;
     const alpha    = 34.5 * Math.PI / 180;
     const expected = R_GIRDLE * Math.sin(alpha) + 0.01 * Math.cos(alpha);
     expect(planes.bezel.offset).toBeCloseTo(expected, 8);
   });
 
-  it('pavilion plane passes through the girdle-bottom rim at φ=π/8', () => {
-    // Pavilion mains share the bezel's azimuth (φ = π/8) as is standard
-    // for a brilliant cut. Same formula as the bezel test thanks to the
-    // cos²+sin² simplification; the -Z sign on the normal component cancels
-    // with the -H_GIRDLE_HALF in the anchor, giving the same clean form.
+  it('pavilion plane passes through the girdle-bottom rim at φ=0', () => {
+    // Pavilion mains share the bezel's azimuth (φ = 0, through a table
+    // vertex). The -Z sign on the normal component cancels with the
+    // -H_GIRDLE_HALF in the anchor, giving the same clean formula as
+    // the bezel test.
     const { R_GIRDLE, planes } = DIAMOND_INTERNALS;
     const alpha    = 40.75 * Math.PI / 180;
     const expected = R_GIRDLE * Math.sin(alpha) + 0.01 * Math.cos(alpha);
     expect(planes.pavilion.offset).toBeCloseTo(expected, 8);
   });
 
-  it('star plane passes through the table-edge midpoint at φ=0', () => {
-    // Star facets sit DIRECTLY OUTSIDE a table edge: base on the edge,
-    // apex pointing outward onto the bezel surface. Centreline along
-    // φ=0, so the normal has no Y component. Plane passes through the
-    // edge midpoint (R_TABLE_APOTHEM, 0, H_TOP).
+  it('star plane passes through the table-edge midpoint at φ=π/8', () => {
+    // Star facets sit DIRECTLY OUTSIDE a table edge: base on the edge
+    // between two adjacent table vertices at φ = 0 and φ = π/4, apex
+    // pointing outward onto the bezel surface. Centreline along φ = π/8
+    // (edge midpoint direction). Anchor is the table-edge midpoint
+    // (R_TABLE_APOTHEM·cos(π/8), R_TABLE_APOTHEM·sin(π/8), H_TOP); the
+    // cos²+sin² collapse in the offset reduces to the clean formula
+    // R_TABLE_APOTHEM · sin(22°) + H_TOP · cos(22°).
     //
     // Pins the star-plane anchor on R_TABLE_APOTHEM — catches a silent
-    // swap back to the old "star at table vertex" convention which would
-    // push the facet 0.02·d too far outward and produce a visibly wrong
-    // crown faceting pattern.
+    // regression back to either R_TABLE_VERTEX (vertex anchor) or to
+    // the φ = 0 placement, both of which produce a visibly off cut.
     const { R_TABLE_APOTHEM, H_TOP, planes } = DIAMOND_INTERNALS;
     const alpha    = 22.0 * Math.PI / 180;
     const expected = R_TABLE_APOTHEM * Math.sin(alpha) + H_TOP * Math.cos(alpha);

@@ -214,11 +214,11 @@ fn diamondProxyVertex(vi: u32, d: f32) -> vec3<f32> {
   let triIdx    = vi / 3u;        // 0..45
   let vertInTri = vi % 3u;        // 0..2
 
-  // Both table and girdle vertex angles share `π/8 + k·π/4` so crown
-  // trapezoids and girdle-band quads are planar — every edge stays
-  // radially aligned.
+  // Table vertices sit at φ = k·π/4 (= bezel / pavilion-main azimuths, see
+  // src/math/diamond.ts PHI_BEZEL doc). Girdle vertices share the same
+  // azimuths so each crown trapezoid + girdle-band quad stays planar.
   let kAngleStep = 0.7853981633974483;          // π/4
-  let kAngleBias = 0.39269908169872414;         // π/8
+  let kAngleBias = 0.0;                         // vertex 0 at φ = 0 (on the +X axis)
 
   if (triIdx < 6u) {
     // ----- Table fan ----- verts: (table[0], table[t+1], table[t+2]).
