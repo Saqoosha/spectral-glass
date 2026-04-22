@@ -1,6 +1,6 @@
-# Real Refraction
+# Spectral Glass
 
-> **Live demo**: <https://saqoosha.github.io/real-refraction/> (Chrome/Edge 120+ or Safari 18+)
+> **Live demo**: <https://saqoosha.github.io/spectral-glass/> (Chrome/Edge 120+ or Safari 18+)
 
 A realtime WebGPU demo of **physically accurate spectral dispersion** through
 Apple "Liquid Glass"-style floating pills, triangular prisms, and rotating
