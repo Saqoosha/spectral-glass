@@ -21,8 +21,8 @@ struct Frame {
   refractionMode:     f32,
   pillCount:          f32,
   applySrgbOetf:      f32,  // unused by this shader (sRGB encoding moved to postprocess.wgsl). Slot is kept so the Frame UBO layout stays stable — host still writes 0/1 (uniforms.ts) and tests/uniformsLayout.test.ts pins the name. Reclaiming it means touching all three together.
-  shape:              f32,  // 0 = pill (stadium), 1 = prism, 2 = cube (rotates), 3 = plate (wavy, tumbles)
-  time:               f32,  // wall-clock seconds since start (always advancing, even while paused). Drives the noise streams: TAA sub-pixel jitter and per-pixel wavelength stratification. Rotation matrices are derived from `sceneTime` (below), NOT from this field — see `cubeRot` / `plateRot` and the time-stream split in src/main.ts.
+  shape:              f32,  // 0 = pill (stadium), 1 = prism, 2 = cube (rotates), 3 = plate (wavy, tumbles), 4 = diamond (round brilliant, rotates)
+  time:               f32,  // wall-clock seconds since start (always advancing, even while paused). Drives the noise streams: TAA sub-pixel jitter and per-pixel wavelength stratification. Rotation matrices are derived from `sceneTime` (below), NOT from this field — see `cubeRot` / `plateRot` / `diamondRot` and the time-stream split in src/main.ts.
   historyBlend:       f32,  // 0.2 steady state, 1.0 when the scene changed this frame
   heroLambda:         f32,  // jittered each frame in [380,700]; Hero mode uses this
   cameraZ:            f32,  // distance from screen plane (z=0) to camera, in pixels
@@ -58,6 +58,16 @@ struct Frame {
   // the TAA reprojection path so tumbling plates also keep sharp refracted
   // texture instead of ghosting.
   plateRotPrev:       mat3x3<f32>,
+  // Diamond rotation (rx·ry composed on the host from `sceneTime` — see
+  // src/math/diamond.ts). Fixed -20° X-axis tilt + Y-axis spin, same host-side
+  // pattern as cube/plate. Used by sdfDiamond (fold to fundamental wedge) and
+  // by vs_proxy (rotate the AABB so the proxy stays tight as the diamond
+  // spins).
+  diamondRot:         mat3x3<f32>,
+  // Previous frame's diamond rotation for the TAA reprojection path — mirrors
+  // cubeRotPrev / plateRotPrev so spinning diamonds keep sharp refracted
+  // texture instead of ghosting.
+  diamondRotPrev:     mat3x3<f32>,
   // Plate wave parameters. `waveLipFactor` is the precomputed safety factor
   // 1/sqrt(1 + (amp·freq)²) applied inside sdfWavyPlate so the raw
   // (box - wave) value is a valid Lipschitz bound — host-side computation
@@ -72,6 +82,16 @@ struct Frame {
   waveFreq:           f32,
   waveLipFactor:      f32,
   sceneTime:          f32,
+  // Diamond parameters. `diamondSize` is the girdle diameter in pixels — the
+  // sdfDiamond SDF scales all facet offsets by this at eval time so one uniform
+  // covers every diamond in the scene (all instances share the size slider).
+  // Remaining three slots are reserved for future diamond controls (star
+  // angle override, crown angle override) and kept zeroed by the host so a
+  // layout bump isn't required when Phase B wires them up.
+  diamondSize:        f32,
+  _diamondPad0:       f32,
+  _diamondPad1:       f32,
+  _diamondPad2:       f32,
   pills:              array<PillGpu, MAX_PILLS>,
 };
 
@@ -124,6 +144,72 @@ fn sdfPrism(p: vec3<f32>, halfSize: vec3<f32>, edgeR: f32) -> f32 {
   let dX = abs(p.x) - halfSize.x;
   let w  = vec2<f32>(d2, dX);
   return length(max(w, vec2<f32>(0.0))) + min(max(w.x, w.y), 0.0) - edgeR;
+}
+
+// Round brilliant cut diamond — 58 facets reduced to 7 distance terms via
+// D_8 (octagonal) symmetry folding. Produces a convex polytope that reads
+// as a classic jewelry-store brilliant cut.
+//
+// Strategy:
+//   1. Apply `diamondRot` (fixed tilt + Y-axis spin) to the local point.
+//   2. Fold XY into the 1/16 fundamental wedge [0°, 22.5°] via three
+//      reflections: abs on both components of p.xy (folds across the X
+//      and Y axes → first quadrant, 4-fold), swap-if-y>x (folds across
+//      the y=x line → first octant, 8-fold), and reflect across the
+//      22.5° line (folds the octant's upper half onto its lower half →
+//      fundamental π/8 wedge, 16-fold). Each facet class has exactly ONE
+//      representative in the wedge, so evaluating its plane once gives
+//      the correct distance by symmetry — no `min` over multiple rotated
+//      copies.
+//   3. Evaluate 7 signed-distance terms: table (+Z cap), bezel (crown
+//      main), star, upper half (girdle-adjacent crown facet), girdle
+//      cylinder, lower half (girdle-adjacent pavilion facet), pavilion
+//      main. The pointed culet is naturally handled by the pavilion
+//      planes converging at (0, 0, H_BOT) — `max()` closes the shape
+//      correctly at the apex.
+//   4. Return the max (intersection of half-spaces = convex polytope SDF),
+//      with all offsets multiplied by `frame.diamondSize` so the runtime
+//      slider scales the whole shape uniformly.
+//
+// The plane normals and unit-diameter offsets are module-scope constants
+// injected from src/math/diamond.ts via src/webgpu/pipeline.ts. That's the
+// single source of truth — TS computes them once from Tolkowsky angles and
+// the shader never sees raw angles, only the derived plane coefficients.
+//
+// Unlike cube/pill/prism this SDF has NO `edgeR` rounding — sharp facets
+// are the look. Facet creases trip sceneNormal()'s degenerate-gradient
+// sentinel and render as bg (thin dark seam), matching the expected
+// real-diamond crease appearance.
+fn sdfDiamond(pIn: vec3<f32>, diameter: f32) -> f32 {
+  let p0 = frame.diamondRot * pIn;
+
+  // 1/16 fold: abs on BOTH xy components [4-fold — folds across X and Y
+  // axes], swap if y>x [8-fold — reflection across y=x], reflect across
+  // θ=π/8 line [16-fold].
+  var q = abs(p0.xy);
+  if (q.y > q.x) { q = q.yx; }
+  // π/8 ≈ 22.5°. The reflection-line normal is the vector perpendicular to
+  // the π/8 line pointing into the θ>π/8 half; reflecting points with
+  // dot(q, nRefl) > 0 folds them back into [0°, 22.5°].
+  let nRefl = vec2<f32>(-0.3826834324, 0.9238795325);   // (-sin(π/8), cos(π/8))
+  let d     = dot(q, nRefl);
+  if (d > 0.0) { q = q - 2.0 * d * nRefl; }
+
+  let p = vec3<f32>(q, p0.z);
+  let r = length(q);   // radial distance — for the cylindrical girdle term
+
+  // 7 distance terms. Offsets are in units of diameter; multiply each by
+  // `diameter` so the whole shape scales with the runtime slider.
+  let d_table    = p.z - DIAMOND_H_TOP * diameter;
+  let d_bezel    = dot(p, DIAMOND_BEZEL_N)      - DIAMOND_BEZEL_O      * diameter;
+  let d_star     = dot(p, DIAMOND_STAR_N)       - DIAMOND_STAR_O       * diameter;
+  let d_uhalf    = dot(p, DIAMOND_UPPER_HALF_N) - DIAMOND_UPPER_HALF_O * diameter;
+  let d_girdle   = r                            - DIAMOND_R_GIRDLE     * diameter;
+  let d_lhalf    = dot(p, DIAMOND_LOWER_HALF_N) - DIAMOND_LOWER_HALF_O * diameter;
+  let d_pavmain  = dot(p, DIAMOND_PAVILION_N)   - DIAMOND_PAVILION_O   * diameter;
+
+  return max(max(max(d_table, d_bezel), max(d_star, d_uhalf)),
+             max(d_girdle, max(d_lhalf, d_pavmain)));
 }
 
 // Thick square plate as a CONSTANT-THICKNESS bent sheet. The midsurface
@@ -202,6 +288,11 @@ fn sceneSdf(p: vec3<f32>) -> f32 {
       // the rim radius for the rounded corner that smooths the wavy front
       // Z face into the flat side X / Y faces (eliminates the rim crease).
       pd = sdfWavyPlate(local, pill.halfSize, pill.edgeR);
+    } else if (shapeId == 4) {
+      // Diamond: size comes from `frame.diamondSize` (single global slider),
+      // so per-pill `halfSize` / `edgeR` slots are ignored. Multi-instance
+      // still works because `local` is relative to each pill's `center`.
+      pd = sdfDiamond(local, frame.diamondSize);
     } else {
       pd = sdfPill(local, pill.halfSize, pill.edgeR);
     }
@@ -458,6 +549,26 @@ fn hitPlatePillIdx(p: vec3<f32>) -> u32 {
     let pill  = frame.pills[i];
     let local = p - pill.center;
     let d     = abs(sdfWavyPlate(local, pill.halfSize, pill.edgeR));
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  return best;
+}
+
+// Diamond-specific pill picker for TAA reprojection. Diamond doesn't use the
+// analytical back-exit path (Phase A reuses the generic insideTrace), but the
+// reprojection path still needs to know WHICH diamond instance we hit so the
+// rotation reprojection pivots around the correct pill center. Without this,
+// multi-instance scenes would reproject every diamond around pill[0]'s center,
+// leaving diamonds at any other position with wrong motion vectors and
+// visible ghost trails proportional to their on-screen distance from pill[0].
+fn hitDiamondPillIdx(p: vec3<f32>) -> u32 {
+  let count = min(u32(frame.pillCount), MAX_PILLS);
+  var best:  u32 = 0u;
+  var bestD: f32 = 1e9;
+  for (var i: u32 = 0u; i < count; i = i + 1u) {
+    let pill  = frame.pills[i];
+    let local = p - pill.center;
+    let d     = abs(sdfDiamond(local, frame.diamondSize));
     if (d < bestD) { bestD = d; best = i; }
   }
   return best;
@@ -757,6 +868,15 @@ fn reprojectHit(hitWorld: vec3<f32>, fragCoord: vec2<f32>, pillIdx: u32, shapeId
     let pill  = frame.pills[pillIdx];
     let local = frame.plateRot * (hitWorld - pill.center);
     prevWorld = transpose(frame.plateRotPrev) * local + pill.center;
+  } else if (shapeId == 4) {
+    // Diamond: same trick as cube/plate. The fold inside sdfDiamond is a
+    // non-linear symmetry operation, but reprojection only cares about the
+    // surface's rigid-body motion (rotation + translation), which `diamondRot`
+    // captures fully. Reading history via `transpose(diamondRotPrev)` pulls
+    // each spinning facet's own pixel from the previous frame.
+    let pill  = frame.pills[pillIdx];
+    let local = frame.diamondRot * (hitWorld - pill.center);
+    prevWorld = transpose(frame.diamondRotPrev) * local + pill.center;
   }
 
   let prevPx = worldToScreenPx(prevWorld);
@@ -814,6 +934,20 @@ fn vs_proxy(
                            pill.halfSize.x,
                            pill.halfSize.z + frame.waveAmp);
     corner = transpose(frame.plateRot) * (CUBE_VERTS[vi] * extent);
+  } else if (shapeId == 4) {
+    // Diamond: size comes from the global `diamondSize` slider, not per-pill
+    // halfSize. A full-diameter cube AABB guarantees coverage under ANY
+    // rotation — every point on the diamond lies within the girdle-radius
+    // sphere (the girdle is the widest part AND its radius exceeds the
+    // pavilion depth, so the whole shape fits inside a sphere of radius
+    // `diamondSize/2`). A tight asymmetric AABB would save a handful of
+    // pixels but requires tracking `H_TOP` vs `H_BOT` and pre-offsetting
+    // the proxy centre when the diamond tilts — not worth the complexity
+    // given the bounding sphere is already conservative and the
+    // `* 1.05` margin absorbs sub-pixel perspective deviations.
+    let d      = frame.diamondSize;
+    let extent = vec3<f32>(d * 0.5, d * 0.5, d * 0.5) * 1.05;
+    corner = transpose(frame.diamondRot) * (CUBE_VERTS[vi] * extent);
   } else {
     let extent = pill.halfSize + vec3<f32>(pill.edgeR);
     corner     = CUBE_VERTS[vi] * extent;
@@ -933,10 +1067,19 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
   // (kept inline rather than a helper because it returns from fs_main; WGSL
   // can't early-return from a callee.)
 
-  let shapeId  = i32(frame.shape + 0.5);
-  let isCube   = shapeId == 2;
-  let isPlate  = shapeId == 3;
-  let hasAnalyticExit = isCube || isPlate;  // used by reprojectHit gate below
+  let shapeId   = i32(frame.shape + 0.5);
+  let isCube    = shapeId == 2;
+  let isPlate   = shapeId == 3;
+  let isDiamond = shapeId == 4;
+  // `hasAnalyticExit` gates back-exit dispatch (cube/plate only — diamond
+  // reuses the generic `insideTrace` per Phase A scope). `hasMotionPivot`
+  // gates the TAA reprojection call below: a shape needs a per-frame
+  // rotation uniform (cubeRot / plateRot / diamondRot) for reprojection to
+  // make sense, which includes diamond even though diamond has no analytic
+  // back-exit. Keeping the two names distinct stops future refactors from
+  // accidentally coupling "has analytic exit" and "has motion pivot".
+  let hasAnalyticExit = isCube || isPlate;
+  let hasMotionPivot  = isCube || isPlate || isDiamond;
 
   // Bg-fallback short-circuit. Run BEFORE `sceneNormal` because WGSL `select`
   // evaluates both arms — wrapping `sceneNormal(h.p)` in select(_, _, h.ok)
@@ -956,10 +1099,13 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
   }
 
   // Hit path. Pill-index scan is per-shape; gated on h.ok above so misses
-  // skip it entirely.
+  // skip it entirely. Diamond still participates — not for analytic back-exit
+  // (that's Phase B) but because `reprojectHit` needs the right pill center
+  // to compute motion vectors for multi-instance scenes.
   var analyticIdx: u32 = 0u;
-  if      (isCube)  { analyticIdx = hitCubePillIdx(h.p); }
-  else if (isPlate) { analyticIdx = hitPlatePillIdx(h.p); }
+  if      (isCube)    { analyticIdx = hitCubePillIdx(h.p); }
+  else if (isPlate)   { analyticIdx = hitPlatePillIdx(h.p); }
+  else if (isDiamond) { analyticIdx = hitDiamondPillIdx(h.p); }
 
   // `sceneNormal` returns the zero vector when the local gradient is too
   // small to normalise (silhouette / wave-crest singularity). Falling back
@@ -1229,14 +1375,15 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
   // host bumps it to 1.0 for one frame on any scene change (photo reload,
   // preset click, shape switch) so the previous scene doesn't ghost in.
   //
-  // TAA motion-vector reprojection: for rotating shapes (cube / plate), read
-  // history at the screen location where the hit point was one frame ago.
-  // This is what turns naive TAA (which blurs tumbling refraction texture
-  // into mush) into real TAA that keeps refracted detail sharp under motion.
-  // Pill / prism pass through unchanged (reprojectHit returns fallbackUv for
-  // non-rotating shapes, and we short-circuit when TAA is off).
+  // TAA motion-vector reprojection: for rotating shapes (cube / plate /
+  // diamond), read history at the screen location where the hit point was
+  // one frame ago. This is what turns naive TAA (which blurs tumbling
+  // refraction texture into mush) into real TAA that keeps refracted detail
+  // sharp under motion. Pill / prism pass through unchanged (reprojectHit
+  // returns fallbackUv for non-rotating shapes, and we short-circuit when
+  // TAA is off).
   var historyUv = uv;
-  if (frame.taaEnabled > 0.5 && hasAnalyticExit) {
+  if (frame.taaEnabled > 0.5 && hasMotionPivot) {
     // Pass the unjittered `px` so the reprojection cancels jitter in the
     // motion delta, keeping static-scene history reads pixel-aligned.
     historyUv = reprojectHit(h.p, px, analyticIdx, shapeId, uv);

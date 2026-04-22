@@ -61,21 +61,25 @@ export function attachDrag(
 
   // Hit testing is shape-aware:
   //   pill / prism (shape 0 / 1): XY axis-aligned box (Z is not visible top-down)
-  //   cube / plate (shape 2 / 3): circular radius, because the rotating /
-  //                               tumbling silhouette changes over time —
-  //                               a circle around the center always contains
-  //                               the visible footprint. Plate adds the
-  //                               wave-amp margin from `getWaveMargin()`
+  //   cube / plate / diamond (shape 2 / 3 / 4): circular radius, because the
+  //                               rotating / tumbling silhouette changes over
+  //                               time — a circle around the center always
+  //                               contains the visible footprint. Plate adds
+  //                               the wave-amp margin from `getWaveMargin()`
   //                               (NOT pill.edgeR — the UI hides edgeR for
   //                               plates, so its persisted value is unrelated
   //                               to the actual wave amplitude on the GPU).
+  //                               Diamond's girdle is the widest part; main.ts
+  //                               writes `pill.hx/hy/hz = diamondSize/2` so
+  //                               the max-of-halfSizes trick below lands on
+  //                               the girdle radius directly.
   const findHit = (x: number, y: number): number => {
     const shapeId = getShapeId();
     for (let i = pills.length - 1; i >= 0; i--) {
       const p  = pills[i]!;
       const dx = x - p.cx;
       const dy = y - p.cy;
-      if (shapeId === 2 || shapeId === 3) {
+      if (shapeId === 2 || shapeId === 3 || shapeId === 4) {
         const r = Math.max(p.hx, p.hy, p.hz) + (shapeId === 3 ? getWaveMargin() : 0);
         if (dx * dx + dy * dy <= r * r) return i;
       } else {

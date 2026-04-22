@@ -28,10 +28,11 @@ function isTypingTarget(t: EventTarget | null): boolean {
 
 // Must match the WGSL `shape` uniform branches in dispersion.wgsl.
 const SHAPE_ID: Record<Params['shape'], number> = {
-  pill:  0,
-  prism: 1,
-  cube:  2,
-  plate: 3,
+  pill:    0,
+  prism:   1,
+  cube:    2,
+  plate:   3,
+  diamond: 4,
 };
 
 // Must match the WGSL `projection` uniform branches (0 = ortho, 1 = perspective).
@@ -244,12 +245,35 @@ async function main(): Promise<void> {
       // the flat side X / Y faces — same role as in cube/pill/prism, so the
       // same `min(edgeR, halfSize)` clamp applies (edgeR ≥ smallest halfSize
       // would invert the rounded-box SDF into degenerate geometry).
-      const isPlate = params.shape === 'plate';
+      //
+      // Diamond ignores per-pill halfSize entirely on the SDF side (shader
+      // reads `frame.diamondSize`), but we still write halfSize to the
+      // girdle radius so the drag layer's circular hit test lands on the
+      // actual silhouette. edgeR stays at 0 for diamond — the shape uses
+      // raw intersection-of-half-spaces without rounding.
+      const isPlate   = params.shape === 'plate';
+      const isDiamond = params.shape === 'diamond';
       for (const pill of pills) {
-        pill.hx    = params.pillLen   / 2;
-        pill.hy    = isPlate ? pill.hx : params.pillShort / 2;
-        pill.hz    = params.pillThick / 2;
-        pill.edgeR = Math.min(params.edgeR, pill.hx, pill.hy, pill.hz);
+        if (isDiamond) {
+          // Diamond ignores halfSize on the SDF side (shader reads
+          // `frame.diamondSize`). We still write hx/hy/hz to the GIRDLE
+          // RADIUS so the drag hit-test — which circumscribes the shape
+          // with a circle of radius `max(hx, hy, hz)` (see pills.ts) —
+          // lands exactly on the silhouette. hz is a deliberate
+          // overestimate of the true half-height (~0.305·d); harmless for
+          // the hit circle because the max() picks the girdle radius from
+          // hx/hy regardless. edgeR is unused for diamond (sharp facets).
+          const half = params.diamondSize / 2;
+          pill.hx    = half;
+          pill.hy    = half;
+          pill.hz    = half;
+          pill.edgeR = 0;
+        } else {
+          pill.hx    = params.pillLen   / 2;
+          pill.hy    = isPlate ? pill.hx : params.pillShort / 2;
+          pill.hz    = params.pillThick / 2;
+          pill.edgeR = Math.min(params.edgeR, pill.hx, pill.hy, pill.hz);
+        }
       }
       // Paused-frame accounting for progressive averaging (see declaration
       // above). During a reset-override window we hold pausedFrames at 1 so
@@ -331,6 +355,10 @@ async function main(): Promise<void> {
         // in "wavelength in px" (more intuitive) → convert 2π/λ here.
         waveAmp:            params.waveAmp,
         waveFreq:           (2 * Math.PI) / Math.max(params.waveWavelength, 1),
+        // Diamond: single global size (girdle diameter in px). Ignored when
+        // the current shape isn't diamond, but the uniform slot is always
+        // written so shape switching doesn't leave stale values.
+        diamondSize:        params.diamondSize,
         pills,
       });
 

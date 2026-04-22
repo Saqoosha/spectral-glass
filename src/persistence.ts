@@ -1,4 +1,5 @@
 import {
+  DIAMOND_SIZE_MAX, DIAMOND_SIZE_MIN,
   EDGE_R_MAX, EDGE_R_MIN, FOV_MAX, FOV_MIN,
   HISTORY_ALPHA_MAX, HISTORY_ALPHA_MIN,
   PILL_LEN_MAX, PILL_LEN_MIN, PILL_SHORT_MAX, PILL_SHORT_MIN,
@@ -31,7 +32,7 @@ type Loaded = {
 
 // Allow-lists for the enum-like fields so a corrupted / hand-edited localStorage
 // can't push invalid strings into the render pipeline.
-const SHAPES        = new Set<Params['shape']>(['pill', 'prism', 'cube', 'plate']);
+const SHAPES        = new Set<Params['shape']>(['pill', 'prism', 'cube', 'plate', 'diamond']);
 const MODES         = new Set<Params['refractionMode']>(['exact', 'approx']);
 const PROJECTIONS   = new Set<Params['projection']>(['ortho', 'perspective']);
 const SAMPLE_COUNTS = new Set<Params['sampleCount']>([3, 8, 16, 32, 64]);
@@ -80,6 +81,11 @@ function validateParams(u: unknown): Partial<Params> {
   // ranges in ui.ts are the source of truth; persistence mirrors them.
   if (isFiniteNumber(p.waveAmp))         out.waveAmp        = clamp(p.waveAmp, WAVE_AMP_MIN, WAVE_AMP_MAX);
   if (isFiniteNumber(p.waveWavelength))  out.waveWavelength = clamp(p.waveWavelength, WAVE_WAVELENGTH_MIN, WAVE_WAVELENGTH_MAX);
+  // Diamond size (girdle diameter in px). Same reason for clamping as the
+  // pill/plate dimensions above: a hand-edited negative/zero value would
+  // invert the polytope SDF into a degenerate shape, and a huge value would
+  // blow the proxy AABB past the viewport.
+  if (isFiniteNumber(p.diamondSize))     out.diamondSize    = clamp(p.diamondSize, DIAMOND_SIZE_MIN, DIAMOND_SIZE_MAX);
   return out;
 }
 

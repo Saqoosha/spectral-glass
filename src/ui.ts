@@ -1,5 +1,10 @@
 import { Pane } from 'tweakpane';
 import type { PerfStats } from './perfStats';
+import { DIAMOND_SIZE_MIN, DIAMOND_SIZE_MAX } from './math/diamond';
+
+// Re-exported so persistence.ts can clamp hand-edited storage to the same
+// slider range the UI uses, without importing diamond.ts in two places.
+export { DIAMOND_SIZE_MIN, DIAMOND_SIZE_MAX };
 
 /** Perspective FOV slider / persistence bounds, in degrees.
  *  Anything outside the range drives `cameraZ = (height/2) / tan(fov/2)` into
@@ -63,7 +68,7 @@ export type AaMode = 'none' | 'fxaa' | 'taa';
 
 export type Params = {
   sampleCount: 3 | 8 | 16 | 32 | 64;
-  shape: 'pill' | 'prism' | 'cube' | 'plate';
+  shape: 'pill' | 'prism' | 'cube' | 'plate' | 'diamond';
   n_d: number;
   V_d: number;
   pillLen: number;
@@ -85,6 +90,11 @@ export type Params = {
   // label reads naturally; the conversion happens in main.ts.
   waveAmp: number;
   waveWavelength: number;
+  // Diamond-only size control. Girdle diameter in pixels. All diamond
+  // instances in the scene share this single value (per-instance sizing is
+  // Phase B territory); per-instance POSITIONS are still independent via the
+  // pills array's cx/cy.
+  diamondSize: number;
 };
 
 type Preset = {
@@ -239,10 +249,11 @@ export function initUi(
   const shape = pane.addFolder({ title: 'Shape' });
   const shapeBinding = shape.addBinding(params, 'shape', {
     options: {
-      Pill:              'pill',
-      'Prism (rainbow)': 'prism',
-      'Cube (rotating)': 'cube',
-      'Plate (wavy)':    'plate',
+      Pill:                  'pill',
+      'Prism (rainbow)':     'prism',
+      'Cube (rotating)':     'cube',
+      'Plate (wavy)':        'plate',
+      'Diamond (brilliant)': 'diamond',
     },
   });
   // Pill / prism keep the three independent X/Y/Z sliders (their geometries
@@ -263,13 +274,19 @@ export function initUi(
     params.pillThick = cubeSize.value;
   });
   const edgeBinding = shape.addBinding(params, 'edgeR', { min: EDGE_R_MIN, max: EDGE_R_MAX, step: 0.5, label: 'Edge radius' });
-  // Plate-only wave controls. Both stay hidden for pill/prism/cube and
-  // animate in only when shape === 'plate' (syncShapeSliders below).
+  // Plate-only wave controls. Both stay hidden for pill/prism/cube/diamond
+  // and animate in only when shape === 'plate' (syncShapeSliders below).
   const waveAmpBinding = shape.addBinding(params, 'waveAmp', {
     min: WAVE_AMP_MIN, max: WAVE_AMP_MAX, step: 0.5, label: 'Wave amp',
   });
   const waveLenBinding = shape.addBinding(params, 'waveWavelength', {
     min: WAVE_WAVELENGTH_MIN, max: WAVE_WAVELENGTH_MAX, step: 1, label: 'Wavelength',
+  });
+  // Diamond-only size control. Hidden for every other shape (fixed Tolkowsky
+  // proportions mean there's nothing else to tweak on the diamond — size is
+  // the single knob).
+  const diamondSizeBinding = shape.addBinding(params, 'diamondSize', {
+    min: DIAMOND_SIZE_MIN, max: DIAMOND_SIZE_MAX, step: 1, label: 'Size',
   });
 
   // Show the right subset of sliders for each shape. Pill/prism use all three
@@ -279,15 +296,22 @@ export function initUi(
   // keeps cubeSize in sync with pillLen so switching shape mid-session
   // doesn't surprise the user.
   function syncShapeSliders(): void {
-    const isCube  = params.shape === 'cube';
-    const isPlate = params.shape === 'plate';
-    lenBinding.hidden      = isCube;
-    shortBinding.hidden    = isCube || isPlate;
-    thickBinding.hidden    = isCube;
-    sizeBinding.hidden     = !isCube;
-    edgeBinding.hidden     = false;     // plate uses edgeR as the rounded rim radius (smooths wavy Z face into flat X/Y faces)
-    waveAmpBinding.hidden  = !isPlate;
-    waveLenBinding.hidden  = !isPlate;
+    const isCube    = params.shape === 'cube';
+    const isPlate   = params.shape === 'plate';
+    const isDiamond = params.shape === 'diamond';
+    // Diamond ignores per-pill halfSize / edgeR entirely — it drives its
+    // geometry from `diamondSize` alone. Hiding the pill-dimension sliders
+    // when diamond is selected keeps the Shape folder tidy; they reappear
+    // with their prior values on shape switch (the params object isn't
+    // mutated by this hide/show cycle).
+    lenBinding.hidden        = isCube    || isDiamond;
+    shortBinding.hidden      = isCube    || isPlate    || isDiamond;
+    thickBinding.hidden      = isCube    || isDiamond;
+    sizeBinding.hidden       = !isCube;
+    edgeBinding.hidden       = isDiamond;  // plate uses edgeR as its rim radius; diamond wants sharp facets, no rounding
+    waveAmpBinding.hidden    = !isPlate;
+    waveLenBinding.hidden    = !isPlate;
+    diamondSizeBinding.hidden = !isDiamond;
     if (isCube) {
       // Average the three dims to seed Size — covers the case where shape
       // was just switched from pill/prism with non-equal extents.
@@ -443,6 +467,7 @@ export function defaultParams(): Params {
     historyAlpha: 0.2,
     waveAmp: 20,
     waveWavelength: 300,
+    diamondSize: 200,
   };
 }
 

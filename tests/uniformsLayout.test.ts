@@ -75,25 +75,30 @@ describe('uniform layout drift detector', () => {
       'cubeRotPrev',
       'plateRot',
       'plateRotPrev',
+      'diamondRot',
+      'diamondRotPrev',
       'waveAmp', 'waveFreq', 'waveLipFactor', 'sceneTime',
+      'diamondSize', '_diamondPad0', '_diamondPad1', '_diamondPad2',
       'pills',
     ]);
   });
 
-  it('all four rotation slots are mat3x3<f32> (12 floats / 48 B each)', () => {
+  it('all six rotation slots are mat3x3<f32> (12 floats / 48 B each)', () => {
     // If the field order changes, the previous test fires first. This pins
     // the types so a swap to e.g. mat4x4 (which is 64 B, not 48) trips a
     // separate failure — otherwise the order test would pass but pills
-    // would be corrupted. Both prev-frame slots are pinned too so a
+    // would be corrupted. All prev-frame slots are pinned too so a
     // refactor that changes their representation can't slip through.
     const fields = declaredFields(FRAME_BODY);
     expect(fields.find((f) => f.name === 'cubeRot')?.type).toBe('mat3x3<f32>');
     expect(fields.find((f) => f.name === 'cubeRotPrev')?.type).toBe('mat3x3<f32>');
     expect(fields.find((f) => f.name === 'plateRot')?.type).toBe('mat3x3<f32>');
     expect(fields.find((f) => f.name === 'plateRotPrev')?.type).toBe('mat3x3<f32>');
+    expect(fields.find((f) => f.name === 'diamondRot')?.type).toBe('mat3x3<f32>');
+    expect(fields.find((f) => f.name === 'diamondRotPrev')?.type).toBe('mat3x3<f32>');
   });
 
-  it('pills is the last field (so HEAD + rotations + plateParams is the right base)', () => {
+  it('pills is the last field (so HEAD + rotations + plateParams + diamondParams is the right base)', () => {
     const fields = declaredFields(FRAME_BODY);
     expect(fields[fields.length - 1]?.name).toBe('pills');
     expect(fields[fields.length - 1]?.type).toBe('array<PillGpu, MAX_PILLS>');

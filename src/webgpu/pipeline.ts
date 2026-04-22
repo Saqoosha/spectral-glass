@@ -4,6 +4,7 @@ import type { History } from './history';
 import type { Intermediate } from './postprocess';
 import vsSrc from '../shaders/fullscreen.wgsl?raw';
 import fsSrc from '../shaders/dispersion.wgsl?raw';
+import { diamondWgslConstants } from '../math/diamond';
 
 export type Pipeline = {
   /** Fullscreen bg pass: cheap photo+history blend, covers every pixel. */
@@ -23,7 +24,14 @@ export async function createPipeline(
   history: History,
 ): Promise<Pipeline> {
   const { device } = ctx;
-  const module = device.createShaderModule({ label: 'dispersion', code: vsSrc + '\n' + fsSrc });
+  // Prepend the diamond const block (Tolkowsky-derived plane normals +
+  // offsets, generated in src/math/diamond.ts) so `sdfDiamond` reads the same
+  // numbers the TS side computed. Injecting here rather than hand-copying
+  // them into the WGSL source keeps TS as the single source of truth.
+  const module = device.createShaderModule({
+    label: 'dispersion',
+    code:  diamondWgslConstants() + vsSrc + '\n' + fsSrc,
+  });
 
   // Surface WGSL diagnostics immediately — the default WebGPU path swallows compile
   // errors and only reports them at pipeline-creation time as opaque validation errors.
