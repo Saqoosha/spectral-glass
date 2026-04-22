@@ -221,6 +221,29 @@ fn maxInternalPath() -> f32 {
   return max(m, 32.0);  // floor so degenerate zero-size pills don't stop march
 }
 
+// Returns a unit-length surface normal at `p`, OR the zero vector as a
+// sentinel meaning "the local SDF gradient is degenerate, don't trust this
+// hit". Callers must check `dot(n, n) > 0.5` and fall back to the bg path
+// for sentinel hits — see fs_main below.
+//
+// Degenerate-gradient guard exists because at a silhouette / wave crest
+// the six finite-diff probes can land on near-equal SDF values (e.g. a
+// wavy plate hit exactly at the apex of a bump where ∇sdf is tangent to
+// the view ray), making `g` near-zero. `normalize(0)` returns NaN, which
+// would cascade:
+//   refract(rd, NaN, eta) → all-NaN r1
+//   dot(r1, r1) < 1e-4 compares NaN < 1e-4 → false → continue NOT taken
+//   the NaN flows through inside-trace, photo sample, CMF normalise →
+//   final outRgb NaN → written to history → permanent white/black pixel.
+// Visible specifically when TAA is off: with the ray frozen at the pixel
+// centre every frame, the same degenerate hit re-fires forever; with TAA
+// jitter the ±0.5 px sub-pixel offset usually misses the singular point.
+//
+// An arbitrary fallback normal (e.g. `(0, 0, 1)`) is worse than no normal:
+// it produces a valid-but-wrong refraction that visibly differs from the
+// neighbours' correct refraction, leaving a dot speckle along edges. The
+// honest sentinel + bg fallback at the call site renders these pixels as
+// background, which blends seamlessly with the surrounding silhouette.
 fn sceneNormal(p: vec3<f32>) -> vec3<f32> {
   let e = vec2<f32>(HIT_EPS, 0.0);
   let g = vec3<f32>(
@@ -228,23 +251,9 @@ fn sceneNormal(p: vec3<f32>) -> vec3<f32> {
     sceneSdf(p + e.yxy) - sceneSdf(p - e.yxy),
     sceneSdf(p + e.yyx) - sceneSdf(p - e.yyx),
   );
-  // Degenerate-gradient guard. At a silhouette / wave crest the six finite-
-  // diff probes can land on near-equal SDF values (e.g. a wavy plate hit
-  // exactly at the apex of a bump where ∇sdf is tangent to the view ray),
-  // making `g` near-zero. `normalize(0)` returns NaN, which then cascades:
-  //   refract(rd, NaN, eta) → all-NaN r1
-  //   dot(r1, r1) < 1e-4 compares NaN < 1e-4 → false → continue is NOT taken
-  //   the NaN flows through inside-trace, photo sample, CMF normalise
-  //   final outRgb is NaN or huge → written to history → permanent white /
-  //   black pixel that survives every subsequent EMA blend.
-  // Visible specifically when TAA is off: with the ray frozen at the pixel
-  // centre every frame, the same degenerate hit re-fires forever; with TAA
-  // jitter the ±0.5 px sub-pixel offset usually misses the singular point.
-  // Fall back to a camera-facing +Z normal so the pixel renders as a flat
-  // refraction (slightly wrong direction at most) instead of NaN garbage.
   let len2 = dot(g, g);
   if (len2 < 1e-8) {
-    return vec3<f32>(0.0, 0.0, 1.0);
+    return vec3<f32>(0.0);
   }
   return g * inverseSqrt(len2);
 }
@@ -865,11 +874,23 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
   let h    = sphereTrace(ro, rd, maxT);
   let bg   = textureSampleLevel(photoTex, photoSmp, coverUv(uv), 0.0).rgb;
 
-  if (!h.ok) {
-    // Proxy covered this pixel but no cube surface was reached — pure waste
-    // (the proxy over-covers the shape). In debug mode, tint these MORE
-    // pinkly so the over-coverage "halo" around the cube silhouette is
-    // visible. In normal mode, fall through to the bg color.
+  // Compute front normal up front so we can route degenerate-gradient hits
+  // through the same bg fallback path as misses. `sceneNormal` returns the
+  // zero vector when the gradient is too small to normalise (silhouette /
+  // wave-crest singularity); using an arbitrary fallback normal there
+  // produces a "valid but wrong" refraction that visibly differs from the
+  // surrounding correct refractions, leaving dot speckles along the edge.
+  // Treating it as bg blends seamlessly with the silhouette neighbourhood.
+  let nFront        = select(vec3<f32>(0.0), sceneNormal(h.p), h.ok);
+  let normalIsValid = dot(nFront, nFront) > 0.5;
+
+  if (!h.ok || !normalIsValid) {
+    // Proxy covered this pixel but no usable surface was reached — either
+    // the sphere-trace overshot the actual shape (proxy over-cover) or the
+    // hit landed on a finite-diff-degenerate point. Either way, render as
+    // background. In debug mode, tint these MORE pinkly so the
+    // over-coverage "halo" around the silhouette is visible. In normal mode,
+    // fall through to the bg color.
     var bgFinal = bg;
     if (frame.debugProxy > 0.5) {
       bgFinal = mix(bg, vec3<f32>(1.0, 0.3, 0.7), 0.5);
@@ -884,7 +905,6 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
     return bgOut;
   }
 
-  let nFront   = sceneNormal(h.p);
   let n_d      = frame.n_d;
   let V_d      = frame.V_d;
   let N        = clamp(i32(frame.sampleCount), 1, MAX_N);
