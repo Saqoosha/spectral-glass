@@ -1,5 +1,7 @@
 # Real Refraction
 
+> **Live demo**: <https://saqoosha.github.io/real-refraction/> (Chrome/Edge 120+ or Safari 18+)
+
 A realtime WebGPU demo of **physically accurate spectral dispersion** through
 Apple "Liquid Glass"-style floating pills, triangular prisms, and rotating
 cubes. Unlike the common "shift R/G/B IORs" hack that most web implementations
