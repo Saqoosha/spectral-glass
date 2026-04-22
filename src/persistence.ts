@@ -62,6 +62,11 @@ function validateParams(u: unknown): Partial<Params> {
   if (typeof p.temporalJitter === 'boolean') out.temporalJitter    = p.temporalJitter;
   if (typeof p.debugProxy === 'boolean')     out.debugProxy        = p.debugProxy;
   if (typeof p.aaMode === 'string' && AA_MODES.has(p.aaMode as AaMode)) out.aaMode = p.aaMode as AaMode;
+  // Legacy migration: older payloads carry `taa: boolean`. Preserve the
+  // user's intent (taa:false -> 'none', taa:true -> 'taa') instead of
+  // silently snapping them to the default. Only apply when aaMode is
+  // absent, so an explicit aaMode in the payload always wins.
+  else if (typeof p.taa === 'boolean')                                 out.aaMode = p.taa ? 'taa' : 'none';
   if (typeof p.paused === 'boolean')         out.paused            = p.paused;
   if (isFiniteNumber(p.historyAlpha))        out.historyAlpha      = clamp(p.historyAlpha, HISTORY_ALPHA_MIN, HISTORY_ALPHA_MAX);
   // Plate wave controls. Clamp to UI slider bounds so hand-edited storage

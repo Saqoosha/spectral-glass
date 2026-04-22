@@ -20,7 +20,7 @@ struct Frame {
   jitter:             f32,
   refractionMode:     f32,
   pillCount:          f32,
-  applySrgbOetf:      f32,  // slot kept for UBO layout parity; sRGB encoding lives in postprocess.wgsl now
+  applySrgbOetf:      f32,  // unused by this shader (sRGB encoding moved to postprocess.wgsl). Slot is kept so the Frame UBO layout stays stable — host still writes 0/1 (uniforms.ts) and tests/uniformsLayout.test.ts pins the name. Reclaiming it means touching all three together.
   shape:              f32,  // 0 = pill (stadium), 1 = prism, 2 = cube (rotates), 3 = plate (wavy, tumbles)
   time:               f32,  // wall-clock seconds since start (always advancing, even while paused). Drives the noise streams: TAA sub-pixel jitter and per-pixel wavelength stratification. Rotation matrices are derived from `sceneTime` (below), NOT from this field — see `cubeRot` / `plateRot` and the time-stream split in src/main.ts.
   historyBlend:       f32,  // 0.2 steady state, 1.0 when the scene changed this frame
@@ -1063,8 +1063,9 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
   // Pill / prism don't participate in (B) — their silhouettes are either
   // flat faces or continuous quadric curves that (A) already handles.
   //
-  // Clamp 6.0 caps drift into the tiny tail of the pyramid where the photo
-  // is only a few pixels wide and detail is meaningless.
+  // Clamp 6.0 caps the LOD at roughly mip-6 — ~30 px wide on a 1920x1080
+  // photo, ~4 px on the 256² gradient fallback. Further blurring stops
+  // adding AA benefit and just washes the refraction color to an average.
   var curvatureTilt: f32 = 0.0;
   if (isCube) {
     let nLocal    = frame.cubeRot * nFront;

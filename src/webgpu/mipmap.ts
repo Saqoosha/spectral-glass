@@ -1,15 +1,21 @@
-// Mipmap generation via fullscreen-triangle blit. Each mip level is
-// rendered from the previous one using linear bilinear downsampling — the
-// standard WebGPU approach since the API has no built-in `generateMipmap`
-// command. Pipeline + sampler are cached per format so repeat calls (e.g.
-// every photo reload) cost only the render passes.
+// Mipmap generation via fullscreen-triangle blit. Each mip level is a
+// single bilinear-tap downsample of the previous level — close enough to
+// a 2×2 box filter, the standard WebGPU approach since the API has no
+// built-in `generateMipmap` command. Pipeline + sampler are cached per
+// GPUDevice so repeat calls (every photo reload) cost only the render
+// passes; keying by device keeps the cache correct across
+// device-lost/reinit (even though the current app fails fatally on
+// device-lost, this avoids locking that behavior in).
 //
 // sRGB handling: when `format` is an -srgb variant, the sampler auto-decodes
 // on read and the render target auto-encodes on write, so the intermediate
 // linear math is correct. No manual conversion needed.
 
-const pipelineCache = new Map<GPUTextureFormat, GPURenderPipeline>();
-let cachedSampler: GPUSampler | null = null;
+type DeviceCache = {
+  pipelines: Map<GPUTextureFormat, GPURenderPipeline>;
+  sampler:   GPUSampler;
+};
+const deviceCaches = new WeakMap<GPUDevice, DeviceCache>();
 
 const MIPMAP_WGSL = /* wgsl */ `
 struct Vout {
@@ -37,10 +43,32 @@ fn fs(v: Vout) -> @location(0) vec4<f32> {
 }
 `;
 
+function getDeviceCache(device: GPUDevice): DeviceCache {
+  let cache = deviceCaches.get(device);
+  if (!cache) {
+    cache = {
+      pipelines: new Map(),
+      sampler:   device.createSampler({
+        label:     'mipmap-blit',
+        magFilter: 'linear',
+        minFilter: 'linear',
+      }),
+    };
+    deviceCaches.set(device, cache);
+  }
+  return cache;
+}
+
 function getPipeline(device: GPUDevice, format: GPUTextureFormat): GPURenderPipeline {
-  const cached = pipelineCache.get(format);
+  const cache = getDeviceCache(device);
+  const cached = cache.pipelines.get(format);
   if (cached) return cached;
   const module = device.createShaderModule({ label: 'mipmap-blit', code: MIPMAP_WGSL });
+  // pushErrorScope around sync pipeline creation so an invalid pipeline
+  // (e.g. a format without RENDER_ATTACHMENT support) doesn't silently
+  // sit in the cache and break every future mipmap regen. If the scope
+  // reports an error, drop the bad entry so the next call retries.
+  device.pushErrorScope('validation');
   const pipeline = device.createRenderPipeline({
     label:     `mipmap-blit-${format}`,
     layout:    'auto',
@@ -48,18 +76,14 @@ function getPipeline(device: GPUDevice, format: GPUTextureFormat): GPURenderPipe
     fragment:  { module, entryPoint: 'fs', targets: [{ format }] },
     primitive: { topology: 'triangle-list' },
   });
-  pipelineCache.set(format, pipeline);
-  return pipeline;
-}
-
-function getSampler(device: GPUDevice): GPUSampler {
-  if (cachedSampler) return cachedSampler;
-  cachedSampler = device.createSampler({
-    label:     'mipmap-blit',
-    magFilter: 'linear',
-    minFilter: 'linear',
+  void device.popErrorScope().then((err) => {
+    if (err) {
+      console.error(`[mipmap] pipeline creation failed for ${format}: ${err.message}`);
+      cache.pipelines.delete(format);
+    }
   });
-  return cachedSampler;
+  cache.pipelines.set(format, pipeline);
+  return pipeline;
 }
 
 export function mipLevelsFor(width: number, height: number): number {
@@ -76,7 +100,7 @@ export function generateMipmaps(
 ): void {
   if (mipLevelCount <= 1) return;
   const pipeline = getPipeline(device, format);
-  const sampler  = getSampler(device);
+  const sampler  = getDeviceCache(device).sampler;
   const encoder  = device.createCommandEncoder({ label: 'mipmap-gen' });
 
   for (let level = 1; level < mipLevelCount; level++) {

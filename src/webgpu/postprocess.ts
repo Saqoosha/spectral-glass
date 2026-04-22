@@ -4,12 +4,14 @@ import postSrc from '../shaders/postprocess.wgsl?raw';
 
 /** Intermediate render target that the scene (bg + proxy) writes linear
  *  rgba16float into. The post-process pass samples this and emits the
- *  display-encoded color to the swapchain. Same size as the canvas. */
+ *  display-encoded color to the swapchain. Same size as the canvas.
+ *  All fields are readonly — on resize, `resizeIntermediate` replaces
+ *  the whole `post.intermediate` wholesale rather than mutating dims. */
 export type Intermediate = {
-  texture: GPUTexture;
-  view:    GPUTextureView;
-  width:   number;
-  height:  number;
+  readonly texture: GPUTexture;
+  readonly view:    GPUTextureView;
+  readonly width:   number;
+  readonly height:  number;
 };
 
 /** Post-process pipelines + their shared resources.
@@ -17,15 +19,19 @@ export type Intermediate = {
  *    ran in the scene pass, so post just copies + encodes).
  *  - `fxaa` is used for aaMode === 'fxaa'.
  *  Both read from `intermediate` via `bindGroup`, which is rebuilt on
- *  canvas resize. */
+ *  canvas resize.
+ *
+ *  Only `intermediate` and `bindGroup` change after construction (resize
+ *  rebuilds them in lockstep). The remaining wiring — pipelines, UBO,
+ *  bgLayout, sampler — is fixed for the lifetime of the GPUDevice. */
 export type PostProcess = {
-  passthrough:  GPURenderPipeline;
-  fxaa:         GPURenderPipeline;
-  bindGroup:    GPUBindGroup;
-  intermediate: Intermediate;
-  postBuf:      GPUBuffer;
-  bgLayout:     GPUBindGroupLayout;
-  sampler:      GPUSampler;
+  readonly passthrough:  GPURenderPipeline;
+  readonly fxaa:         GPURenderPipeline;
+  bindGroup:             GPUBindGroup;
+  intermediate:          Intermediate;
+  readonly postBuf:      GPUBuffer;
+  readonly bgLayout:     GPUBindGroupLayout;
+  readonly sampler:      GPUSampler;
 };
 
 const POST_FLOATS = 4;               // 16 B UBO (applySrgbOetf + 3 pads)
@@ -72,9 +78,10 @@ export async function createPostProcess(
 
   const info = await module.getCompilationInfo();
   for (const m of info.messages) {
-    const line = `[WGSL ${m.type}] ${m.message}`;
+    const line = `[WGSL ${m.type}] line ${m.lineNum}:${m.linePos}: ${m.message}`;
     if (m.type === 'error') console.error(line);
     else if (m.type === 'warning') console.warn(line);
+    else console.info(line);
   }
   if (info.messages.some((m) => m.type === 'error')) {
     throw new Error('WGSL post-process shader compile failed — see console');
@@ -125,8 +132,17 @@ export async function createPostProcess(
 }
 
 /** Reallocate the intermediate texture on canvas resize and rebuild the
- *  bind group that points at it. Returns the updated PostProcess; the
- *  caller should also destroy the previous texture via `destroyIntermediate`. */
+ *  bind group that points at it. Mutates `post` in place. Returns true
+ *  when a realloc happened (so the caller can log or notify).
+ *
+ *  Destroy timing: the old texture is freed synchronously. WebGPU holds
+ *  a strong reference from any command buffer that already named it as
+ *  a color attachment, so pending work is unaffected — the new frame's
+ *  encoder will see the replacement `post.intermediate` and `post.bindGroup`
+ *  (rebuilt below in lockstep). Photo reload waits for
+ *  `queue.onSubmittedWorkDone` before destroying because the photo texture
+ *  is also read by the next frame's bg sampler; the intermediate only
+ *  ever feeds the post pass in the same frame, so no drain is needed. */
 export function resizeIntermediate(
   device: GPUDevice,
   post:   PostProcess,
@@ -142,8 +158,10 @@ export function resizeIntermediate(
 
 export function writePostFrame(device: GPUDevice, post: PostProcess, applySrgbOetf: boolean): void {
   postScratch[0] = applySrgbOetf ? 1 : 0;
-  // 1..3 pad — left at 0 by the fill below (scratch is persistent but only
-  // slot 0 ever varies, so one explicit write is enough).
+  // Slots 1..3 are padding kept at 0. `postScratch` is zero-initialised
+  // once at module scope and only slot 0 is ever rewritten, so no
+  // per-call `fill(0)` is needed. If a future field starts varying,
+  // mirror `uniforms.ts writeFrame` and add an explicit reset.
   device.queue.writeBuffer(post.postBuf, 0, postScratch);
 }
 

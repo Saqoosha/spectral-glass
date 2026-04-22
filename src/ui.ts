@@ -55,8 +55,10 @@ export const HISTORY_ALPHA_MAX = 1.0;
 /** Antialiasing strategy. `taa` drives in-scene sub-pixel jitter +
  *  motion-vector history reprojection (converges under motion but can
  *  add noise around rotating shapes). `fxaa` is a single-frame post
- *  filter — no history, no jitter, softer edges, zero temporal
- *  instability. `none` is raw render for A/B comparison. */
+ *  filter — no jitter, softer edges, zero temporal instability. `none`
+ *  disables both strategies for A/B comparison; the history EMA
+ *  (controlled by `historyAlpha`) and the passthrough post pass still
+ *  run, so moving scenes will still ghost unless historyAlpha = 1. */
 export type AaMode = 'none' | 'fxaa' | 'taa';
 
 export type Params = {

@@ -10,10 +10,10 @@ refraction shader only runs on fragments the proxy actually covers.
 ┌──────────────────────────────────────────────────────────────────────┐
 │  every RequestAnimationFrame:                                        │
 │                                                                      │
-│  1. resize canvas + history if needed                                │
+│  1. resize canvas + history + post-intermediate if needed            │
 │  2. push params → pills (hx/hy/hz/edgeR)                             │
 │  3. writeFrame → uniform buffer (544 B: scalars + 4×mat3 + pills)    │
-│  4. draw pass:                                                       │
+│  4. scene pass (writes → intermediate(rgba16f) + history[write]):    │
 │     a. bg sub-pass: fullscreen triangle → fs_bg (photo + history)    │
 │     b. proxy sub-pass: instanced 3D cube mesh → fs_main              │
 │          per-fragment camera ray (ortho OR perspective)              │
@@ -25,11 +25,18 @@ refraction shader only runs on fragments the proxy actually covers.
 │                    per-wavelength Fresnel mix                        │
 │                    accumulate weighted by xyzToSrgb(cmf(λ))          │
 │                  EMA-blend with history[read] (historyBlend)         │
-│                  write blended → swapchain (+ OETF if needed)        │
-│                  write blended → history[write] (linear)             │
-│  5. flip history.current                                             │
+│                  write linear → intermediate @location(0)            │
+│                  write linear → history[write] @location(1)          │
+│  5. post pass (reads intermediate, writes → swapchain):              │
+│     aaMode === 'fxaa' ? fs_fxaa : fs_passthrough                     │
+│     sRGB OETF applied here (once) if swapchain is non-sRGB           │
+│  6. flip history.current                                             │
 └──────────────────────────────────────────────────────────────────────┘
 ```
+
+Scene and post are encoded into a single command buffer and submitted
+together (`main.ts` loop). The intermediate stays canvas-sized and is
+reallocated in `resizeIntermediate` whenever the canvas size changes.
 
 Two pipelines share one explicit bind group layout (so `frame` is visible to
 both vertex and fragment stages). Two bind groups are pre-built at pipeline
@@ -64,17 +71,20 @@ fragment shader's rays will trace.
 | Module | Owns |
 |---|---|
 | `src/webgpu/device.ts` | Adapter / device acquisition, canvas context config, resize, `device.lost` + `uncapturederror` handlers. |
-| `src/webgpu/pipeline.ts` | Bg + proxy pipelines (async creation) with shared explicit bind group layout; two pre-built bind groups; draw submission. |
+| `src/webgpu/pipeline.ts` | Bg + proxy pipelines (async creation) with shared explicit bind group layout; two pre-built bind groups; `encodeScene` records the scene pass into a caller-supplied encoder. |
+| `src/webgpu/postprocess.ts` | Post-process pipelines (passthrough + FXAA), canvas-sized intermediate `rgba16float` render target, post UBO (sRGB flag), bind group + resize logic, `encodePost` records the post pass into the caller's encoder. |
+| `src/webgpu/mipmap.ts` | Fullscreen-triangle blit used by `photo.ts` to generate a mipmap chain after upload. Per-device pipeline + sampler cache (`WeakMap<GPUDevice,…>`). `pushErrorScope` catches invalid pipelines so a bad format isn't silently cached. |
 | `src/webgpu/uniforms.ts` | `FrameParams` type + buffer writer. Module-scope `Float32Array` scratch. |
 | `src/webgpu/history.ts` | Ping-pong `rgba16float` texture pair. Recreated on resize. |
-| `src/webgpu/perf.ts` | Optional GPU timestamp-query harness (ping-ponged readback). Enabled via `?perf=1`, surfaces timings on `window._perf`. |
-| `src/photo.ts` | Picsum fetch → `ImageBitmap` → GPU texture. Gradient fallback on failure. `destroyPhoto` for the queue-drained cleanup path in `main.ts`. |
+| `src/webgpu/perf.ts` | Optional GPU timestamp-query harness (ping-ponged readback). Enabled via `?perf=1`, surfaces timings on `window._perf`. Currently instruments the scene pass only; the FXAA post pass isn't in the HUD. |
+| `src/photo.ts` | Picsum fetch → `ImageBitmap` → GPU texture with mipmaps. Gradient fallback on fetch/decode failure (GPU-upload errors are let through to `uncapturederror` instead). `destroyPhoto` for the queue-drained cleanup path in `main.ts`. |
 | `src/pills.ts` | Pill state (mutated by drag) + pointer-event lifecycle with a discriminated-union drag state. |
 | `src/ui.ts` | Tweakpane bindings for `Params`. |
 | `src/main.ts` | Wires everything, runs the RAF loop inside a `try/catch`, owns reload-race protection via `photoRevision`. |
 | `src/math/{cauchy,wyman,srgb,sdfPill,sdfPrism,sdfCube,camera,cube,plate}.ts` | Pure functions mirrored by the WGSL of the same name. The vitest suite (≈ 50 tests) is the reference. `cube.ts` / `plate.ts` precompute the tumble rotations (rz·rx for cube, rx·ry for plate) on the host so the shader avoids per-SDF-eval cos/sin. |
-| `src/shaders/dispersion.wgsl` | Everything visible: SDFs (pill/prism/cube/plate + rotations), sphere-trace, Cauchy, CIE, sRGB, Fresnel, OETF, spectral accumulation, TIR fallback, `cubeAnalyticExit` + `plateAnalyticExit`. |
-| `src/persistence.ts` | localStorage read/write with schema versioning, field validation, and a trailing-edge debounced saver (+ `flush()` for pagehide). |
+| `src/shaders/dispersion.wgsl` | Everything visible: SDFs (pill/prism/cube/plate + rotations), sphere-trace, Cauchy, CIE, Fresnel, spectral accumulation, TIR fallback, `cubeAnalyticExit` + `plateAnalyticExit`. Writes linear RGB to `@location(0)` — sRGB encoding now lives in postprocess.wgsl. |
+| `src/shaders/postprocess.wgsl` | Passthrough + FXAA fragment shaders. FXAA runs in perceptual (sRGB) luma for edge detection and blends color in linear space. Applies the sRGB OETF when the swapchain is non-sRGB. |
+| `src/persistence.ts` | localStorage read/write with schema versioning, field validation, legacy `taa: boolean` → `aaMode` migration, and a trailing-edge debounced saver (+ `flush()` for pagehide). |
 
 ## Uniform layout
 
@@ -119,7 +129,9 @@ beyond `pillCount` are zeros.
   the primary ray by a per-pixel hash within ±0.5 px, and reads history at
   `fragCoord + (projected_prev_world − projected_curr_world)` — jitter
   cancels in the delta so static scenes read pixel-aligned history while
-  moving shapes keep refracted texture sharp.
+  moving shapes keep refracted texture sharp. Driven by `aaMode === 'taa'`
+  in `Params` (see `src/ui.ts`); `aaMode === 'fxaa'` runs FXAA in the post
+  pass instead, and `aaMode === 'none'` does neither.
 - `waveAmp` / `waveFreq` drive the plate's midsurface displacement
   (`waveAmp · sin(waveFreq · x + 2·sceneTime) · sin(waveFreq · y +
   2·sceneTime)`). Ignored for other shapes.
@@ -148,6 +160,58 @@ beyond `pillCount` are zeros.
 - `cameraZ` / `projection` drive ortho vs perspective (CPU derives `cameraZ`
   from the UI's FOV and canvas height).
 - `debugProxy` tints every proxy fragment pink for visual inspection.
+- `applySrgbOetf` is kept in the UBO slot for layout parity only — the
+  scene shader no longer reads it, because the post pass owns all sRGB
+  encoding. Host still writes 0/1 into the slot to keep
+  `tests/uniformsLayout.test.ts` happy; reclaiming the slot means
+  touching that test + `uniforms.ts` + the WGSL struct together.
+
+## Post-process pass (AA / sRGB OETF)
+
+The scene pass writes linear RGB into a canvas-sized `rgba16float`
+intermediate. A second render pass then reads that intermediate and
+writes the swapchain:
+
+- `aaMode === 'none'` → `fs_passthrough` copies and applies sRGB OETF
+  (identity if the swapchain is already `*-srgb`).
+- `aaMode === 'fxaa'` → `fs_fxaa` runs a 9-tap FXAA 3.x-style spatial
+  filter (sRGB-space luma for edge detection, linear blend for color),
+  then the same sRGB encode.
+- `aaMode === 'taa'` → `fs_passthrough` again; TAA already ran in the
+  scene pass (sub-pixel jitter + motion-vector history reprojection),
+  so post has nothing to do except encode.
+
+Keeping both scene color targets (`@location(0)` intermediate,
+`@location(1)` history) as `rgba16float` lets FXAA work on the same
+linear pixels the history EMA already sees, and consolidates the sRGB
+OETF in one place. The post UBO is 16 B (one `applySrgbOetf` flag + 3
+padding floats); only the flag is written, at startup — it's constant
+for the lifetime of the session.
+
+`src/webgpu/postprocess.ts` owns the intermediate's lifecycle. The
+texture is freed synchronously on resize because WebGPU holds a strong
+reference from any command buffer already naming it as a color
+attachment (photo reload drains `queue.onSubmittedWorkDone` because the
+photo is sampled across frames; the intermediate is single-frame).
+
+## Photo mipmaps
+
+`src/photo.ts` uploads the photo with a full mip chain generated by a
+fullscreen-triangle blit pipeline in `src/webgpu/mipmap.ts`. The
+per-wavelength refraction sample in the fragment shader picks a LOD
+based on two terms:
+
+- **Grazing incidence** — `max(0, -log2(cosT) - 1)` — sample footprint
+  grows as `~1/cosT` at grazing angles.
+- **Rounded-rim curvature** — `(1 - max(|nLocal|)) · 8` — on the rounded
+  edges of cube / plate the front normal rotates ~90° across an
+  `edgeR`-wide screen region, blowing up the refracted-UV Jacobian
+  independently of `cosT`. Pill / prism skip this term.
+
+The sum is clamped to `[0, 6]`. Trilinear filtering on the sampler
+(`mipmapFilter: 'linear'`) gives the sub-level blending. Background
+samples (bg + reflection fallback) stay at LOD 0 because they're
+1:1 with screen pixels.
 
 ## Why per-wavelength sRGB weighting?
 

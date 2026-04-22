@@ -3,8 +3,12 @@
 // swapchain. FXAA runs on perceptual-space luma for accurate edge
 // detection, but blends color in linear space (physically correct).
 //
-// Shared with fullscreen.wgsl's vs_main via the same vertex-index trick,
-// but duplicated here to avoid cross-module bind-group layout coupling.
+// Uses the same vertex-index fullscreen-triangle trick as
+// fullscreen.wgsl's vs_main; the vertex code is copied here (not
+// shared) so this module stays self-contained — different bind-group
+// layout, and `Vout` carries an explicit `uv` that `VsOut` in
+// fullscreen.wgsl would need to gain too. UV is V-flipped so (0,0)
+// lands at the top-left like the DOM origin.
 
 struct Post {
   // f32 flag: 1 = apply sRGB OETF manually (swapchain is non-sRGB, e.g.
@@ -72,8 +76,10 @@ fn fs_passthrough(v: Vout) -> @location(0) vec4<f32> {
 // 4 samples along the detected edge direction. Parameters follow Lottes'
 // canonical tuning — 0.0625 minimum absolute contrast (i.e. skip flat
 // regions), 0.125 relative contrast (skip very dark-but-low-contrast),
-// 8-pixel direction clamp for long edges, and a 1/128 direction-reduce
-// term that keeps axis-aligned edges from collapsing to a divide-by-zero.
+// 8-pixel direction clamp for long edges, and a luma-scaled `dirReduce`
+// (average of the 4 corner lumas × 0.125, floored at 1/128) that damps
+// the step on bright edges where the raw direction vector would dominate
+// and guards axis-aligned edges from a divide-by-zero.
 //
 // Runs entirely in a single pass, no temporal history. Cost ≈ 0.3 ms at
 // 1080p — dominated by the bilinear taps, which are fast on every GPU.

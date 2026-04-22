@@ -11,16 +11,21 @@ const PHOTO_FORMAT: GPUTextureFormat = 'rgba8unorm-srgb';
 
 export async function loadPhoto(device: GPUDevice, seed = Date.now()): Promise<PhotoTex> {
   const url = `https://picsum.photos/seed/${seed}/1920/1080`;
+  // Keep the catch tight to the network + decode path so GPU upload
+  // errors (createTexture / copyExternalImageToTexture / mipmap gen)
+  // bubble up to the uncapturederror handler instead of being disguised
+  // as "photo fetch failed" and silently falling back to the gradient.
+  let bitmap: ImageBitmap;
   try {
     const res = await fetch(url, { mode: 'cors' });
     if (!res.ok) throw new Error(`Photo fetch failed: ${res.status} ${res.statusText} (${url})`);
     const blob = await res.blob();
-    const bitmap = await createImageBitmap(blob, { colorSpaceConversion: 'none' });
-    return uploadBitmap(device, bitmap);
+    bitmap = await createImageBitmap(blob, { colorSpaceConversion: 'none' });
   } catch (err) {
     console.error('[photo] fetch/decode failed, using gradient fallback:', err);
     return createGradientTexture(device);
   }
+  return uploadBitmap(device, bitmap);
 }
 
 function uploadBitmap(device: GPUDevice, bitmap: ImageBitmap): PhotoTex {

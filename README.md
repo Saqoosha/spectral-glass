@@ -62,7 +62,7 @@ Requires a WebGPU-capable browser (Chrome / Edge 120+, Safari 18+).
 | **`Z`** (hold) | Force `N = 3` (fake RGB dispersion) for A/B comparison |
 | **Space** | Shuffle pills to random positions |
 | **`R`** | Reload a new random Picsum photo |
-| Tweakpane | IOR, Abbe, sample count, shape (pill / prism / cube / plate), dimensions, wave amp + wavelength (plate only), refraction strength, projection (ortho / perspective), FOV, temporal jitter, refraction mode, **Stop the world** (freeze rotation/wave while AA keeps converging), **TAA** (sub-pixel jitter + motion-vector history reprojection) |
+| Tweakpane | IOR, Abbe, sample count, shape (pill / prism / cube / plate), dimensions, wave amp + wavelength (plate only), refraction strength, projection (ortho / perspective), FOV, temporal jitter, refraction mode, **Stop the world** (freeze rotation/wave while AA keeps converging), **AA** mode selector — `None` / `FXAA` (single-frame spatial filter) / `TAA` (sub-pixel jitter + motion-vector history reprojection) |
 | Presets | Subtle pill · Strong dispersion · Prism rainbow · Rotating cube · Wavy plate |
 | Materials | 10 real-world glasses (water → BK7 → SF flints → diamond → moissanite) + 4 fantasy (n_d up to 3.5, V_d down to 2) |
 
@@ -130,8 +130,22 @@ every proxy fragment pink and see the rasterised silhouette.
   current and previous frame's `cubeRot` / `plateRot` and uploads them as
   uniforms; cube and plate get analytic-exit reprojection, pill / prism
   fall back to the unreprojected read.
-- **sRGB OETF** applied manually when the swapchain format is non-sRGB.
+- **Post-process pass.** Scene writes linear `rgba16float` into a canvas-sized
+  intermediate; a second pass copies or FXAA-filters it to the swapchain
+  depending on the AA mode. The sRGB OETF is applied once there (identity
+  when the swapchain is already `*-srgb`), so both FXAA and the scene share
+  the same linear pixels and the encoding isn't scattered across shaders.
+- **FXAA (optional).** 9-tap FXAA 3.x in the post pass — luma computed in
+  perceptual (sRGB) space for edge detection, color blended in linear space.
+  Alternative to TAA: no temporal jitter, zero ghosting, slightly softer
+  edges. `~0.3 ms` at 1080p.
+- **Photo mipmaps.** Uploaded photo carries a full mip chain (fullscreen-blit
+  downsample). Per-wavelength refraction sample picks an LOD from two terms:
+  `-log2(cosT) - 1` (grazing-angle minification) plus `(1 - max(|nLocal|)) ·
+  8` on cube / plate to handle rounded-rim normal-turn aliasing. Clamped to
+  `[0, 6]`.
 - **localStorage persistence.** Validated load (rejects NaN / bogus enums),
+  legacy `taa: boolean` → `aaMode` migration for older payloads,
   trailing-edge debounced save, pagehide flush.
 
 ## Project structure
@@ -155,11 +169,14 @@ src/
 ├── webgpu/
 │   ├── device.ts               Adapter + device + error handlers
 │   ├── history.ts              Ping-pong history textures
-│   ├── pipeline.ts             Bg + proxy pipelines + shared bind groups
+│   ├── pipeline.ts             Bg + proxy pipelines + shared bind groups + encodeScene
+│   ├── postprocess.ts          Intermediate rgba16f target + passthrough/FXAA pipelines + encodePost
+│   ├── mipmap.ts               Fullscreen-blit mipmap generator (used by photo.ts)
 │   ├── perf.ts                 GPU timestamp harness (?perf=1)
 │   └── uniforms.ts             Typed uniform buffer writer
 └── shaders/
     ├── fullscreen.wgsl         Fullscreen triangle vertex shader
+    ├── postprocess.wgsl        Passthrough + FXAA fragment shaders + sRGB OETF
     └── dispersion.wgsl         SDFs (pill/prism/cube/plate) + analytic exits + TAA reprojection + spectral dispersion fragment
 
 tests/                          Vitest unit tests for each math module
