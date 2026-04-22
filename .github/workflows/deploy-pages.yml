@@ -41,6 +41,12 @@ jobs:
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
+        # Auto-enable Pages on first run instead of asking the user to flip it
+        # in repo settings. The default repo source `gh-pages` branch never
+        # gets created either way; the upload-pages-artifact step below ships
+        # the dist/ tarball straight to the Pages CDN.
+        with:
+          enablement: true
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
