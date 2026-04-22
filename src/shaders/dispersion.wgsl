@@ -615,7 +615,15 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
   // `jitter` is a per-frame random offset (host-side Math.random()/N); using
   // it as part of the hash seed decorrelates the stratum choice across
   // frames so history accumulates new samples instead of locking on.
-  let pxJit = hash21(px + vec2<f32>(jitter * 1000.0, frame.time * 37.0));
+  //
+  // Shift hash output from [0,1) to [-0.5, 0.5) so the jitter is SIGNED around
+  // the stratum center. With t = (i + 0.5 + pxJit)/N that keeps every sample
+  // inside its own stratum [i/N, (i+1)/N) — critically, the i=N-1 sample
+  // cannot spill past t=1 into invisible λ > 700nm. Without this shift, at
+  // N=3 about a third of pixels lose their red-end sample (CMF≈0 at 720-753
+  // nm), rgbWeight.b drops to zero there, and the renormaliser flips a white
+  // background pixel to yellow.
+  let pxJit = hash21(px + vec2<f32>(jitter * 1000.0, frame.time * 37.0)) - 0.5;
 
   // For each wavelength λ:
   //   1. compute per-λ IOR via Cauchy

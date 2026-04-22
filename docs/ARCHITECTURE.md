@@ -166,7 +166,7 @@ refraction.
 
 ```
 for i in 0..N:
-  pxJit  = hash21(pixel ⊕ time)       // spatial stratification
+  pxJit  = hash21(pixel ⊕ time) - 0.5      // signed [-0.5, 0.5) — see note below
   λ      = mix(380, 700, (i + 0.5 + pxJit) / N)
   ior    = cauchyIor(λ, n_d, V_d)
   r1     = refract(-z, nFront, 1/ior)
@@ -182,6 +182,14 @@ for i in 0..N:
 Per-pixel stratification (`hash21`) means neighbouring pixels pick different
 wavelengths — the eye and temporal accumulation average the spatial noise,
 so N=8 stratified looks like N=16 uniform.
+
+The `- 0.5` on `pxJit` centres the jitter on each stratum so `t = (i + 0.5 +
+pxJit)/N` stays inside `[i/N, (i+1)/N)`. Without that shift the last stratum
+(i = N-1) can overflow past `t = 1` into λ > 700 nm where the CIE matching
+functions are effectively zero, so ~30 % of pixels at N=3 lose their red
+sample and the renormaliser flips a flat-white background to yellow. The
+same off-by-half-stratum also existed at larger N (20 nm overflow at N=8,
+10 nm at N=16), but the artefact was masked by history accumulation.
 
 ### TIR fallback
 

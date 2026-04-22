@@ -27,11 +27,21 @@ red→blue spectrum where the back-face exit lands on the bright sky.
 
 A 3-sample RGB IOR is visibly a *three-band* rainbow. Real glass is a continuous
 spectrum. When dispersion is strong you can see the difference — the 3-sample
-version looks like bad chromatic aberration, while the 8-sample spectral version
-looks like a prism.
+version produces hard R/G/B fringing along every refraction edge, while the
+8-sample spectral version resolves into a continuous rainbow.
 
-Press and hold **`Z`** in the demo to force `N = 3`. Release to go back to
-`N = 8`. The quality difference is unmistakable.
+![3-sample vs 8-sample spectral — zoomed on cube edge](docs/images/rgb-vs-spectral-zoom.png)
+
+Left: `N = 3`, with per-pixel jitter and temporal accumulation disabled so the
+underlying 3-band structure is visible. Right: `N = 8` with the spectral pipeline
+fully on (stratified jitter + CIE reconstruction + EMA history). Same rotating
+glass cube (`n_d = 1.7`, `V_d = 4`), same grayscale background photo, same
+frame — only the per-wavelength sample count and the smoothing pipeline differ.
+
+In the live demo, press and hold **`Z`** to force `N = 3`. Release to go back to
+`N = 8`. With jitter + history on, even `N = 3` looks close to `N = 8` at
+typical dispersion strengths — the 3-band rainbow only shows up cleanly when
+both are off (which is what the image above captures for illustration).
 
 ## Quick start
 
