@@ -27,16 +27,19 @@ export const DIAMOND_SIZE_MAX = 400;
 
 // ---------- Tolkowsky ideal cut (1919) ----------
 
-/** Table size as a fraction of the girdle diameter, measured vertex-to-vertex
- *  of the octagonal table (i.e., R_TABLE_VERTEX = 0.5 · TABLE_RATIO below).
+/** Table size as a fraction of the girdle diameter, measured FLAT-TO-FLAT
+ *  across the octagonal table's apothems (= R_TABLE_APOTHEM / R_GIRDLE).
+ *  This is the GIA / Tolkowsky convention; grading reports quote this value.
+ *  The vertex-to-vertex radius R_TABLE_VERTEX = R_TABLE_APOTHEM / cos(π/8) ≈
+ *  1.082 · R_TABLE_APOTHEM is derived from it — that's the radius the star
+ *  plane anchor uses (the star plane passes through a table vertex on the
+ *  mirror boundary).
  *
- *  Note on conventions: GIA's published "table percentage" for grading a cut
- *  is measured FLAT-TO-FLAT (across apothems), which differs from the
- *  vertex-to-vertex measure here by a factor of cos(π/8) ≈ 0.924. So a value
- *  of 0.53 here corresponds to a GIA table percentage of ≈0.49. Both numbers
- *  are within range of real brilliant cuts — we use vertex-to-vertex
- *  internally because the plane anchors derive more directly from R_TABLE_VERTEX
- *  (the star plane passes through a table vertex on the mirror boundary). */
+ *  Tolkowsky's "ideal cut" prescribes 53 % here; GIA "Excellent" grade lies
+ *  in 52–62 %. Using the vertex-to-vertex convention instead would give a
+ *  visually too-small table for the same nominal ratio, producing a cut that
+ *  reads like a different gem (closer to an "Asscher" or thin-table style)
+ *  rather than a round brilliant. */
 const TABLE_RATIO = 0.53;
 /** Crown main (bezel) facet angle measured from the horizontal girdle plane. */
 const CROWN_ANGLE_DEG = 34.5;
@@ -77,8 +80,13 @@ const UPPER_HALF_ANGLE = UPPER_HALF_ANGLE_DEG * DEG;
 const LOWER_HALF_ANGLE = LOWER_HALF_ANGLE_DEG * DEG;
 
 const R_GIRDLE        = 0.5;                                         // girdle outer radius at unit diameter
-const R_TABLE_VERTEX  = R_GIRDLE * TABLE_RATIO;                      // radius to a table octagon corner
-const R_TABLE_APOTHEM = R_TABLE_VERTEX * Math.cos(Math.PI / 8);      // half the flat-to-flat table width
+// TABLE_RATIO is flat-to-flat (GIA / Tolkowsky convention — see constant doc
+// above), so it's the APOTHEM (perpendicular half-width) of the octagonal
+// table, not the vertex-to-vertex radius. The vertex radius, used by the
+// star plane anchor and the proxy mesh's table-corner vertices, is derived
+// by the octagon geometry relation r_vertex = r_apothem / cos(π/8).
+const R_TABLE_APOTHEM = R_GIRDLE * TABLE_RATIO;                      // half the flat-to-flat table width (Tolkowsky "table %")
+const R_TABLE_VERTEX  = R_TABLE_APOTHEM / Math.cos(Math.PI / 8);     // radius to a table octagon corner
 
 /** Crown height from girdle-top to table plane. Derived from the bezel angle
  *  and the radial gap (girdle outer radius − table apothem), keeping the
@@ -98,15 +106,15 @@ const H_TOP = H_GIRDLE_HALF + H_CROWN;
 /** Z-coordinate of the culet apex (pointed bottom of diamond, negative). */
 const H_BOT = -(H_GIRDLE_HALF + H_PAVILION);
 
-/** Total diamond height / diameter.
+/** Total diamond height / diameter (H_TOP − H_BOT ≈ 0.61).
  *
- *  Currently informational — the vs_proxy AABB in dispersion.wgsl uses an
- *  isotropic `d/2` cube (girdle-radius bounding sphere), which is looser
- *  than a height-aware `(d/2, d/2, d·HEIGHT_RATIO/2)` AABB but avoids
- *  tracking H_TOP/H_BOT's asymmetry across diamond tilts. The diamond.test.ts
- *  suite pins this value so a drift in TABLE_RATIO / CROWN_ANGLE /
- *  PAVILION_ANGLE is caught, and Phase B will consume it if we tighten the
- *  proxy to a cylinder-or-better bound. */
+ *  Not consumed directly by the proxy mesh or the SDF — the proxy synthesises
+ *  its vertices from H_TOP and H_BOT individually (see diamondProxyVertex in
+ *  src/shaders/diamond.wgsl), and the SDF folds into a fundamental wedge that
+ *  doesn't need a total-height scalar. This constant lives on as a
+ *  regression pin: diamond.test.ts asserts it stays in the realistic 0.55–
+ *  0.65 range, so drift in TABLE_RATIO / CROWN_ANGLE / PAVILION_ANGLE is
+ *  caught before the rendered shape stops reading as a brilliant cut. */
 export const DIAMOND_HEIGHT_RATIO = H_TOP - H_BOT;   // H_TOP + |H_BOT|
 
 // ---------- facet plane derivation (unit-diameter scale) ----------
@@ -239,6 +247,21 @@ function emitPlaneConst(prefix: string, p: FacetPlane): string {
 }
 
 /**
+ * Proxy mesh triangle/vertex count — the single source of truth that both
+ * the host draw call (src/webgpu/pipeline.ts) and the WGSL proxy vertex
+ * shader (dispersion.wgsl's `maxVerts` guard + diamond.wgsl's
+ * `diamondProxyVertex` bound check) read from. Keeping these as exports
+ * rather than magic numbers means a Phase B mesh change only needs edits
+ * on the shader side — TS picks up the right draw count automatically.
+ *
+ * Mesh topology: 6 table fan + 16 crown trapezoids + 16 girdle band
+ * (2 rings × 8 quads, covers the cylindrical girdle thickness that a
+ * single-ring mesh misses at edge midpoints) + 8 pavilion cone = 46 tri.
+ */
+export const DIAMOND_PROXY_TRI_COUNT  = 46;
+export const DIAMOND_PROXY_VERT_COUNT = DIAMOND_PROXY_TRI_COUNT * 3;  // 138
+
+/**
  * WGSL `const` declarations for the diamond SDF plane table. Prepended to the
  * dispersion shader source in src/webgpu/pipeline.ts so the shader reads
  * from module-scope constants rather than uniforms — zero uniform bandwidth,
@@ -249,27 +272,38 @@ function emitPlaneConst(prefix: string, p: FacetPlane): string {
  * the whole shape uniformly.
  */
 export function diamondWgslConstants(): string {
-  // Proxy mesh tightly wraps the diamond's convex hull: an octagonal table
-  // on top, 8 trapezoidal crown side faces, and a cone down to the culet
-  // apex (no flat pavilion — the pavilion IS a cone). vs_proxy synthesizes
-  // 30 triangles × 3 = 90 vertices from Tolkowsky constants below; zero
-  // over-coverage except for the tiny sliver between the octagonal girdle
-  // approximation and the true circular girdle (circumscribed octagon,
-  // 8.2 % radial slack at vertex angles, 0 % at edge midpoints).
+  // Proxy mesh tightly wraps the diamond's convex hull: 8-gon table on top,
+  // 8 crown trapezoids, 8 girdle band quads (covers the thin cylindrical
+  // girdle that a single-ring mesh would miss at octagon edge midpoints),
+  // 8 pavilion-cone triangles down to the culet. Total 46 triangles = 138
+  // vertices. Octagonal approximations use a CIRCUMSCRIBING octagon
+  // (radius = R_GIRDLE/cos(π/8)) so the inscribed circle through edge
+  // midpoints stays tangent to the true girdle cylinder — zero
+  // under-coverage at edge midpoints, 8.2 % over-coverage at octagon
+  // corners only.
   //
-  // DIAMOND_R_TABLE_VERTEX matches `R_TABLE_VERTEX = R_GIRDLE·TABLE_RATIO`
-  // above — the radius from the table octagon's centre to its corners.
+  // DIAMOND_R_TABLE_VERTEX is the radius from the table octagon's centre
+  // to its corners. The table's APOTHEM (= R_GIRDLE·TABLE_RATIO per the
+  // flat-to-flat Tolkowsky convention) is the perpendicular half-width
+  // and relates as r_apothem = r_vertex · cos(π/8).
+  //
   // DIAMOND_GIRDLE_R_CIRC = R_GIRDLE / cos(π/8) is the radius to the
-  // circumscribing octagon's vertices, the smallest octagon that fully
+  // circumscribing octagon's vertices — the smallest octagon that fully
   // contains the girdle cylinder.
+  //
+  // DIAMOND_H_GIRDLE_HALF is the half-thickness of the girdle cylindrical
+  // band (z ∈ [-H_GIRDLE_HALF, +H_GIRDLE_HALF]), needed by the proxy's
+  // top- and bottom- girdle rings that flank the band.
   const girdleRCirc = R_GIRDLE / Math.cos(Math.PI / 8);
   return [
     '// ---- generated by src/math/diamond.ts — do not edit here ----',
     `const DIAMOND_H_TOP:             f32 = ${fwgsl(H_TOP)};`,
     `const DIAMOND_H_BOT:             f32 = ${fwgsl(H_BOT)};`,
+    `const DIAMOND_H_GIRDLE_HALF:     f32 = ${fwgsl(H_GIRDLE_HALF)};`,
     `const DIAMOND_R_GIRDLE:          f32 = ${fwgsl(R_GIRDLE)};`,
     `const DIAMOND_R_TABLE_VERTEX:    f32 = ${fwgsl(R_TABLE_VERTEX)};`,
     `const DIAMOND_GIRDLE_R_CIRC:     f32 = ${fwgsl(girdleRCirc)};`,
+    `const DIAMOND_PROXY_VERT_COUNT:  u32 = ${DIAMOND_PROXY_VERT_COUNT}u;`,
     emitPlaneConst('DIAMOND_BEZEL',      BEZEL_PLANE),
     emitPlaneConst('DIAMOND_STAR',       STAR_PLANE),
     emitPlaneConst('DIAMOND_UPPER_HALF', UPPER_HALF_PLANE),
@@ -290,10 +324,15 @@ export const DIAMOND_INTERNALS = {
   R_TABLE_APOTHEM,
   H_CROWN,
   H_PAVILION,
+  H_GIRDLE_HALF,
   H_TOP,
   H_BOT,
   CROWN_ANGLE_DEG,
   PAVILION_ANGLE_DEG,
+  // R_CIRC = girdle circumscribing octagon radius — used by the proxy mesh;
+  // exported so tests can pin `R_CIRC = R_GIRDLE / cos(π/8)` and the
+  // circumscribing-octagon slack math doesn't drift silently.
+  GIRDLE_R_CIRC: R_GIRDLE / Math.cos(Math.PI / 8),
   planes: {
     bezel:      BEZEL_PLANE,
     star:       STAR_PLANE,

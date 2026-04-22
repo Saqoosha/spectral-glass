@@ -246,6 +246,14 @@ fn sceneSdf(p: vec3<f32>) -> f32 {
 // the scene. Used to cap insideTrace. For a rotated cube the diagonal (√3
 // times the max half-side, doubled) is the longest possible chord; for pill
 // and prism the 3D diagonal of the AABB is an upper bound too.
+//
+// Diamond: main.ts writes `pill.hx/hy/hz = diamondSize/2` for diamond
+// instances, so `length(halfSize)*2 = √3·diamondSize ≈ 1.73·d`. The actual
+// diamond's longest interior chord is 2·R_GIRDLE = diameter (between
+// opposite girdle points), comfortably smaller than the 1.73·d bound. If
+// main.ts ever stops writing diamond halfSize this way the cap could drop
+// below the true max chord and clip the pavilion's deepest rays — keep the
+// pill.halfSize initialisation in sync with `params.diamondSize`.
 fn maxInternalPath() -> f32 {
   let count = min(u32(frame.pillCount), MAX_PILLS);
   var m: f32 = 0.0;
@@ -846,12 +854,14 @@ fn vs_proxy(
   let shapeId = i32(frame.shape + 0.5);
 
   // Per-shape vertex budget: 36 for cube/pill/prism/plate (CUBE_VERTS array
-  // size), 90 for diamond (exact convex-hull mesh: 6 table + 16 crown + 8
-  // pavilion = 30 triangles). The draw call always issues 90 vertices per
-  // instance — the extra 54 invocations for non-diamond shapes are trivial
-  // compared to the alternative of a per-shape draw call. The guard prevents
-  // a CUBE_VERTS out-of-bounds access for non-diamond shapes when vi ≥ 36.
-  let maxVerts = select(36u, 90u, shapeId == 4);
+  // size), DIAMOND_PROXY_VERT_COUNT (138) for diamond. Reading the diamond
+  // count from the TS-injected const (single source of truth shared with
+  // the host draw call in pipeline.ts) means a Phase B mesh change only
+  // needs updates on the TS side — the guard picks up the new value
+  // automatically. The guard prevents CUBE_VERTS out-of-bounds access for
+  // non-diamond shapes when vi ≥ 36; past DIAMOND_PROXY_VERT_COUNT the
+  // diamond branch itself no longer has a valid vertex, so clip early.
+  let maxVerts = select(36u, DIAMOND_PROXY_VERT_COUNT, shapeId == 4);
   if (vi >= maxVerts) {
     return vec4<f32>(2.0, 2.0, 0.5, 1.0);
   }

@@ -5,15 +5,26 @@ import type { Intermediate } from './postprocess';
 import vsSrc from '../shaders/fullscreen.wgsl?raw';
 import fsSrc from '../shaders/dispersion.wgsl?raw';
 import diamondSrc from '../shaders/diamond.wgsl?raw';
-import { diamondWgslConstants } from '../math/diamond';
+import { diamondWgslConstants, DIAMOND_PROXY_VERT_COUNT } from '../math/diamond';
+
+// Cube-topology vertex count (pill/prism/cube/plate all use the 12-triangle
+// unit-cube proxy defined in dispersion.wgsl's CUBE_VERTS array).
+const CUBE_PROXY_VERT_COUNT = 36;
+// Draw-call vertex count — max across all shapes, so one draw covers both
+// the cube topology (non-diamond) AND the diamond's convex-hull mesh. The
+// maxVerts guard at the top of vs_proxy (src/shaders/dispersion.wgsl) clips
+// the upper range for non-diamond shapes to a degenerate off-screen vertex.
+const PROXY_VERTS_PER_INSTANCE = Math.max(CUBE_PROXY_VERT_COUNT, DIAMOND_PROXY_VERT_COUNT);
 
 export type Pipeline = {
   /** Fullscreen bg pass: cheap photo+history blend, covers every pixel. */
   readonly bg:    GPURenderPipeline;
-  /** Per-pill proxy pass: instanced 3D cube mesh (12 tris, 36 verts),
-   *  optionally rotated for shape==cube. The heavy refraction shader runs
-   *  only on fragments inside the proxy silhouette — for the default 4-pill
-   *  layout that's ~25 % of screen; scales with on-screen shape area. */
+  /** Per-pill proxy pass: instanced 3D proxy mesh synthesized per shape in
+   *  vs_proxy. pill/prism/cube/plate use a 12-triangle unit cube (36 verts);
+   *  diamond uses an exact convex-hull mesh (`DIAMOND_PROXY_VERT_COUNT`
+   *  verts). The heavy refraction shader runs only on fragments inside the
+   *  proxy silhouette — for the default 4-pill layout that's ~25 % of
+   *  screen; scales with on-screen shape area. */
   readonly proxy: GPURenderPipeline;
   bindGroups:     [GPUBindGroup, GPUBindGroup];  // index = history read slot (1 - current)
 };
@@ -188,14 +199,14 @@ export function encodeScene(
   // shape size. Reuses the bind group set before the bg pass because both
   // pipelines share `pipelineLayout`.
   //
-  // 90 vertices = max(cube=36, diamond-convex-hull=90). vs_proxy gates by
-  // `shapeId` so non-diamond shapes discard the extra 54 vertices via an
-  // off-screen degenerate position — 54 wasted vertex shader invocations per
-  // instance is cheaper than toggling the draw count per shape (which would
-  // need to live in a host-side branch on the hot render loop).
+  // Vertex count = max(cube=36, diamond=DIAMOND_PROXY_VERT_COUNT). vs_proxy
+  // gates by `shapeId` so non-diamond shapes discard the extra vertices via
+  // an off-screen degenerate position. Kept as a single draw (rather than
+  // per-shape draw counts) for host-side simplicity — the wasted invocations
+  // are negligible next to the proxy fragment work.
   if (pillCount > 0) {
     pass.setPipeline(pl.proxy);
-    pass.draw(90, pillCount, 0, 0);
+    pass.draw(PROXY_VERTS_PER_INSTANCE, pillCount, 0, 0);
   }
   pass.end();
 }

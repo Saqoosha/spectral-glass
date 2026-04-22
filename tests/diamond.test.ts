@@ -4,6 +4,8 @@ import {
   diamondWgslConstants,
   DIAMOND_HEIGHT_RATIO,
   DIAMOND_INTERNALS,
+  DIAMOND_PROXY_TRI_COUNT,
+  DIAMOND_PROXY_VERT_COUNT,
   DIAMOND_SIZE_MIN,
   DIAMOND_SIZE_MAX,
 } from '../src/math/diamond';
@@ -199,8 +201,15 @@ describe('diamondWgslConstants', () => {
   it('emits WGSL const declarations for every plane and the table/girdle scalars', () => {
     const wgsl = diamondWgslConstants();
     // Pins the names the shader reads — a rename here breaks the shader build.
+    // Scalars (geometry + proxy-mesh helpers):
     expect(wgsl).toContain('const DIAMOND_H_TOP:');
+    expect(wgsl).toContain('const DIAMOND_H_BOT:');
+    expect(wgsl).toContain('const DIAMOND_H_GIRDLE_HALF:');
     expect(wgsl).toContain('const DIAMOND_R_GIRDLE:');
+    expect(wgsl).toContain('const DIAMOND_R_TABLE_VERTEX:');
+    expect(wgsl).toContain('const DIAMOND_GIRDLE_R_CIRC:');
+    expect(wgsl).toContain('const DIAMOND_PROXY_VERT_COUNT:');
+    // Facet planes (5 classes × normal + offset = 10 consts):
     expect(wgsl).toContain('const DIAMOND_BEZEL_N:');
     expect(wgsl).toContain('const DIAMOND_BEZEL_O:');
     expect(wgsl).toContain('const DIAMOND_STAR_N:');
@@ -213,11 +222,50 @@ describe('diamondWgslConstants', () => {
     expect(wgsl).toContain('const DIAMOND_PAVILION_O:');
   });
 
+  it('does not emit obsolete constants from earlier iterations', () => {
+    // Guard against accidental re-introduction of the AABB / bipyramid
+    // constants that were replaced with the exact-mesh geometry. Keeping
+    // them around would silently diverge from whatever the shader ends up
+    // using and eventually confuse debuggers.
+    const wgsl = diamondWgslConstants();
+    expect(wgsl).not.toContain('DIAMOND_AABB_HALF_Z');
+    expect(wgsl).not.toContain('DIAMOND_AABB_OFFSET_Z');
+    expect(wgsl).not.toContain('DIAMOND_BASE_R_RATIO');
+  });
+
+  it('radii are ordered table_apothem < table_vertex < girdle < girdle_r_circ', () => {
+    // The octagon geometry demands r_apothem = r_vertex · cos(π/8), so the
+    // strict ordering is a direct cross-check on the flat-to-flat table
+    // convention (TABLE_RATIO applies to apothem, not vertex radius) and on
+    // the circumscribing-octagon formula for the proxy's girdle ring.
+    const i = DIAMOND_INTERNALS;
+    expect(i.R_TABLE_APOTHEM).toBeLessThan(i.R_TABLE_VERTEX);
+    expect(i.R_TABLE_VERTEX).toBeLessThan(i.R_GIRDLE);
+    expect(i.R_GIRDLE).toBeLessThan(i.GIRDLE_R_CIRC);
+    // Pin the circumscribing-octagon formula — the proxy mesh's over/under
+    // coverage analysis depends on it exactly.
+    expect(i.GIRDLE_R_CIRC / i.R_GIRDLE).toBeCloseTo(1 / Math.cos(Math.PI / 8), 8);
+    // Flat-to-flat convention: R_TABLE_APOTHEM = R_GIRDLE · TABLE_RATIO
+    // (not R_TABLE_VERTEX = R_GIRDLE · TABLE_RATIO). Catches a future
+    // accidental revert to vertex-to-vertex, which would silently make the
+    // rendered table narrower than a real brilliant cut.
+    expect(i.R_TABLE_APOTHEM / i.R_GIRDLE).toBeCloseTo(0.53, 8);
+  });
+
   it('formats vectors as vec3<f32>(x, y, z)', () => {
     const wgsl = diamondWgslConstants();
     // Structural check — any syntactically-invalid WGSL here would fail
     // pipeline compilation at startup, but surfacing it in a unit test
     // catches regressions without needing a GPU.
     expect(wgsl).toMatch(/vec3<f32>\(-?\d+\.\d+(?:e-?\d+)?, -?\d+\.\d+(?:e-?\d+)?, -?\d+\.\d+(?:e-?\d+)?\)/);
+  });
+
+  it('emits DIAMOND_PROXY_VERT_COUNT matching the exported TS constant', () => {
+    // Keeps the shader's maxVerts guard literal in sync with the host draw
+    // call (both read the same constant, see src/webgpu/pipeline.ts). A
+    // Phase B mesh change only has to update DIAMOND_PROXY_TRI_COUNT.
+    const wgsl = diamondWgslConstants();
+    expect(wgsl).toContain(`${DIAMOND_PROXY_VERT_COUNT}u;`);
+    expect(DIAMOND_PROXY_VERT_COUNT).toBe(DIAMOND_PROXY_TRI_COUNT * 3);
   });
 });

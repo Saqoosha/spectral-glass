@@ -1,21 +1,23 @@
 // Diamond-specific WGSL — split from dispersion.wgsl to keep the main shader
 // focused on trace/SDF framework and isolate the brilliant-cut geometry work
-// (Phase A's sdfDiamond + proxy mesh + pill picker, Phase B will add the
-// multi-bounce TIR trace here too).
+// (sdfDiamond + proxy mesh + pill picker). Intended home for future diamond-
+// only trace paths so the diamond geometry stays in one file.
 //
 // Depends on:
 //   - Plane / dimension constants injected by src/math/diamond.ts
-//     (DIAMOND_H_TOP, DIAMOND_H_BOT, DIAMOND_R_GIRDLE, DIAMOND_R_TABLE_VERTEX,
-//      DIAMOND_GIRDLE_R_CIRC, DIAMOND_{BEZEL,STAR,UPPER_HALF,LOWER_HALF,PAVILION}_{N,O})
+//     (DIAMOND_H_TOP, DIAMOND_H_BOT, DIAMOND_H_GIRDLE_HALF, DIAMOND_R_GIRDLE,
+//      DIAMOND_R_TABLE_VERTEX, DIAMOND_GIRDLE_R_CIRC,
+//      DIAMOND_{BEZEL,STAR,UPPER_HALF,LOWER_HALF,PAVILION}_{N,O},
+//      DIAMOND_PROXY_VERT_COUNT)
 //   - `struct Frame` and the `@group(0) @binding(0) var<uniform> frame`
 //     binding from dispersion.wgsl
 //   - `MAX_PILLS` from dispersion.wgsl
 //
-// Pipeline.ts concatenates `diamondWgslConstants()` first, then fullscreen.wgsl,
-// then dispersion.wgsl, then this file — so every identifier referenced here
-// is already in scope by the time WGSL's single-pass compile reaches these
-// function bodies. WGSL resolves cross-function calls across the whole module,
-// so `sceneSdf` → `sdfDiamond` works even though sceneSdf appears earlier.
+// See src/webgpu/pipeline.ts for the concat order — this file is last, so
+// everything it references is already in scope by the time WGSL's
+// single-pass compile reaches these function bodies. WGSL resolves cross-
+// function calls across the whole module, so `sceneSdf` → `sdfDiamond`
+// works even though sceneSdf appears earlier.
 
 // -----------------------------------------------------------------------------
 // SDF — round brilliant cut
@@ -110,38 +112,52 @@ fn hitDiamondPillIdx(p: vec3<f32>) -> u32 {
 // Proxy mesh — exact convex-hull synthesis
 // -----------------------------------------------------------------------------
 //
-// Generates a local-space vertex for the 30-triangle (90-vertex) convex-hull
-// proxy mesh given a WebGPU `vertex_index`. Triangles split into three groups:
+// Generates a local-space vertex for the 46-triangle (138-vertex) convex-hull
+// proxy mesh given a WebGPU `vertex_index`. Triangles split into four groups:
 //
 //   0..5   Table fan (top octagon): 6 triangles rooted at table[0], fanning
 //          out to table[t+1]/table[t+2]. Outward normal +Z.
 //
 //   6..21  Crown trapezoids: 8 kite-shaped bezel facets, each split into 2
 //          triangles → 16 total. Connects each table edge (table[k]-
-//          table[k+1]) down to the corresponding girdle edge (girdle[k]-
-//          girdle[k+1]). Outward normal points radially + upward.
+//          table[k+1]) down to the corresponding GIRDLE-TOP edge
+//          (girdleTop[k]-girdleTop[k+1]) at z=+H_GIRDLE_HALF. Outward
+//          normal points radially + upward.
 //
-//   22..29 Pavilion cone: 8 triangles from girdle[k]-girdle[k+1] converging
-//          to the culet apex at (0, 0, H_BOT). Outward normal points
-//          radially + downward.
+//   22..37 Girdle band: 8 rectangular faces wrapping the cylindrical
+//          girdle, each split into 2 triangles → 16 total. Connects
+//          girdleTop[k]-girdleTop[k+1] (z=+H_GIRDLE_HALF) to
+//          girdleBot[k]-girdleBot[k+1] (z=-H_GIRDLE_HALF). Outward normal
+//          points radially (no vertical component). Without this ring the
+//          proxy would pinch inward toward z=0 at octagon edge midpoints
+//          and fail to cover the true cylindrical girdle — visible as
+//          8 thin dark seams at the equator of a rendered diamond.
+//
+//   38..45 Pavilion cone: 8 triangles from girdleBot[k]-girdleBot[k+1]
+//          converging to the culet apex at (0, 0, H_BOT). Outward normal
+//          points radially + downward.
 //
 // Table vertices live at (R_TABLE_VERTEX, angle=π/8+k·π/4, z=H_TOP). Girdle
-// vertices live at (R_CIRC, same angle, z=0), where R_CIRC is the
-// CIRCUMSCRIBING octagon radius = R_GIRDLE/cos(π/8) so the girdle cylinder
-// stays fully covered between vertex pairs. The ~8 % slack at the angle=π/8
-// corners is the only over-coverage this proxy has.
+// vertices live at (R_CIRC, same angle, z=±H_GIRDLE_HALF), where R_CIRC is
+// the CIRCUMSCRIBING octagon radius = R_GIRDLE/cos(π/8) so the girdle
+// cylinder stays fully covered between vertex pairs at every z in the band.
+// The ~8 % radial slack at the angle=π/8 corners is the only over-coverage
+// this proxy has.
 //
-// Callers (vs_proxy in dispersion.wgsl) are expected to bound-check `vi < 90`
-// before calling — a larger `vi` reads off the end of the vertex tables and
-// returns undefined garbage. The 90-vertex budget is enforced at the draw
-// call (see src/webgpu/pipeline.ts) and by the maxVerts guard at the top of
-// vs_proxy.
+// Callers (vs_proxy in dispersion.wgsl) are expected to bound-check
+// `vi < DIAMOND_PROXY_VERT_COUNT` (138) before calling. The vertex budget is
+// enforced at the draw call (see src/webgpu/pipeline.ts) and by the
+// maxVerts guard at the top of vs_proxy — both read the same
+// DIAMOND_PROXY_VERT_COUNT constant so a Phase B mesh change only needs
+// this function + DIAMOND_PROXY_VERT_COUNT updated on the WGSL side; the
+// draw count picks it up automatically.
 fn diamondProxyVertex(vi: u32, d: f32) -> vec3<f32> {
-  let triIdx    = vi / 3u;        // 0..29
+  let triIdx    = vi / 3u;        // 0..45
   let vertInTri = vi % 3u;        // 0..2
 
   // Both table and girdle vertex angles share `π/8 + k·π/4` so crown
-  // trapezoids are planar — every trapezoid edge stays radially aligned.
+  // trapezoids and girdle-band quads are planar — every edge stays
+  // radially aligned.
   let kAngleStep = 0.7853981633974483;          // π/4
   let kAngleBias = 0.39269908169872414;         // π/8
 
@@ -156,17 +172,18 @@ fn diamondProxyVertex(vi: u32, d: f32) -> vec3<f32> {
 
   if (triIdx < 22u) {
     // ----- Crown trapezoids (8 kites, 16 triangles) -----
-    // Each trapezoid connects (table[k]-table[k+1]) to (girdle[k]-girdle[k+1]).
-    // Triangle 0 (sub=0): (table[k], girdle[k], girdle[k+1])
-    // Triangle 1 (sub=1): (table[k], girdle[k+1], table[k+1])
+    // Each trapezoid connects (table[k]-table[k+1]) at z=H_TOP to the
+    // GIRDLE-TOP ring (girdleTop[k]-girdleTop[k+1]) at z=+H_GIRDLE_HALF.
+    // Triangle 0 (sub=0): (table[k], girdleTop[k], girdleTop[kNext])
+    // Triangle 1 (sub=1): (table[k], girdleTop[kNext], table[kNext])
     // Winding picked so cross(edge1, edge2) points radially outward + up.
     let trapK = (triIdx - 6u) / 2u;    // 0..7
     let sub   = (triIdx - 6u) % 2u;    // 0 or 1
     let kNext = (trapK + 1u) % 8u;
 
     // Resolve (vertInTri, sub) → (onTable flag, k index).
-    //   sub=0: [table[k], girdle[k], girdle[kNext]]
-    //   sub=1: [table[k], girdle[kNext], table[kNext]]
+    //   sub=0: [table[k], girdleTop[k], girdleTop[kNext]]
+    //   sub=1: [table[k], girdleTop[kNext], table[kNext]]
     var onTable: bool;
     var kIdx:    u32;
     if (sub == 0u) {
@@ -180,14 +197,44 @@ fn diamondProxyVertex(vi: u32, d: f32) -> vec3<f32> {
     }
     let angle = f32(kIdx) * kAngleStep + kAngleBias;
     let r     = select(DIAMOND_GIRDLE_R_CIRC, DIAMOND_R_TABLE_VERTEX, onTable) * d;
-    let z     = select(0.0, DIAMOND_H_TOP * d, onTable);
+    let z     = select(DIAMOND_H_GIRDLE_HALF * d, DIAMOND_H_TOP * d, onTable);
+    return vec3<f32>(r * cos(angle), r * sin(angle), z);
+  }
+
+  if (triIdx < 38u) {
+    // ----- Girdle band (8 quads, 16 triangles) -----
+    // Each quad wraps the cylindrical girdle between its octagon corners.
+    // Triangle 0 (sub=0): (girdleTop[k], girdleBot[k], girdleBot[kNext])
+    // Triangle 1 (sub=1): (girdleTop[k], girdleBot[kNext], girdleTop[kNext])
+    // Winding: radial-outward normal, no vertical component (cylinder band).
+    let bandK = (triIdx - 22u) / 2u;    // 0..7
+    let sub   = (triIdx - 22u) % 2u;    // 0 or 1
+    let kNext = (bandK + 1u) % 8u;
+
+    // (top vs bot ring, k index).
+    //   sub=0: [top[k], bot[k], bot[kNext]]
+    //   sub=1: [top[k], bot[kNext], top[kNext]]
+    var onTop: bool;
+    var kIdx:  u32;
+    if (sub == 0u) {
+      if      (vertInTri == 0u) { onTop = true;  kIdx = bandK; }
+      else if (vertInTri == 1u) { onTop = false; kIdx = bandK; }
+      else                      { onTop = false; kIdx = kNext; }
+    } else {
+      if      (vertInTri == 0u) { onTop = true;  kIdx = bandK; }
+      else if (vertInTri == 1u) { onTop = false; kIdx = kNext; }
+      else                      { onTop = true;  kIdx = kNext; }
+    }
+    let angle = f32(kIdx) * kAngleStep + kAngleBias;
+    let r     = DIAMOND_GIRDLE_R_CIRC * d;
+    let z     = select(-DIAMOND_H_GIRDLE_HALF * d, DIAMOND_H_GIRDLE_HALF * d, onTop);
     return vec3<f32>(r * cos(angle), r * sin(angle), z);
   }
 
   // ----- Pavilion cone (8 triangles) -----
-  // Each triangle: (culet, girdle[kNext], girdle[k]). Winding chosen so the
-  // outward normal points radially + downward for pavilion faces.
-  let k     = triIdx - 22u;       // 0..7
+  // Each triangle: (culet, girdleBot[kNext], girdleBot[k]). Winding chosen so
+  // the outward normal points radially + downward for pavilion faces.
+  let k     = triIdx - 38u;       // 0..7
   let kNext = (k + 1u) % 8u;
   if (vertInTri == 0u) {
     return vec3<f32>(0.0, 0.0, DIAMOND_H_BOT * d);
@@ -195,5 +242,5 @@ fn diamondProxyVertex(vi: u32, d: f32) -> vec3<f32> {
   let idx   = select(k, kNext, vertInTri == 1u);
   let angle = f32(idx) * kAngleStep + kAngleBias;
   let r     = DIAMOND_GIRDLE_R_CIRC * d;
-  return vec3<f32>(r * cos(angle), r * sin(angle), 0.0);
+  return vec3<f32>(r * cos(angle), r * sin(angle), -DIAMOND_H_GIRDLE_HALF * d);
 }

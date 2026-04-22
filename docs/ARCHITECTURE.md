@@ -81,8 +81,9 @@ fragment shader's rays will trace.
 | `src/pills.ts` | Pill state (mutated by drag) + pointer-event lifecycle with a discriminated-union drag state. |
 | `src/ui.ts` | Tweakpane bindings for `Params`. |
 | `src/main.ts` | Wires everything, runs the RAF loop inside a `try/catch`, owns reload-race protection via `photoRevision`. |
-| `src/math/{cauchy,wyman,srgb,sdfPill,sdfPrism,sdfCube,camera,cube,plate}.ts` | Pure functions mirrored by the WGSL of the same name. The vitest suite (≈ 50 tests) is the reference. `cube.ts` / `plate.ts` precompute the tumble rotations (rz·rx for cube, rx·ry for plate) on the host so the shader avoids per-SDF-eval cos/sin. |
-| `src/shaders/dispersion.wgsl` | Everything visible: SDFs (pill/prism/cube/plate + rotations), sphere-trace, Cauchy, CIE, Fresnel, spectral accumulation, TIR fallback, `cubeAnalyticExit` + `plateAnalyticExit`. Writes linear RGB to `@location(0)` — sRGB encoding now lives in postprocess.wgsl. |
+| `src/math/{cauchy,wyman,srgb,sdfPill,sdfPrism,sdfCube,camera,cube,plate,diamond}.ts` | Pure functions mirrored by the WGSL of the same name. The vitest suite is the reference. `cube.ts` / `plate.ts` / `diamond.ts` precompute the tumble rotations (rz·rx for cube, rx·ry for plate, Rx·Ry for diamond) on the host so the shader avoids per-SDF-eval cos/sin. `diamond.ts` also generates a WGSL `const` block containing its Tolkowsky-derived facet plane coefficients — single source of truth. |
+| `src/shaders/dispersion.wgsl` | Trace/SDF framework: sphere-trace, sceneSdf dispatch, Cauchy, CIE, Fresnel, spectral accumulation, TIR fallback, `cubeAnalyticExit` + `plateAnalyticExit`, proxy vertex + fragment shaders. Writes linear RGB to `@location(0)` — sRGB encoding now lives in postprocess.wgsl. |
+| `src/shaders/diamond.wgsl` | Diamond-specific geometry: sdfDiamond, hitDiamondPillIdx (TAA reprojection pivot picker), diamondProxyVertex (exact convex-hull proxy mesh). Concatenated after dispersion.wgsl at pipeline build time so diamond-only work stays isolated in one file. |
 | `src/shaders/postprocess.wgsl` | Passthrough + FXAA fragment shaders. FXAA runs in perceptual (sRGB) luma for edge detection and blends color in linear space. Applies the sRGB OETF when the swapchain is non-sRGB. |
 | `src/persistence.ts` | localStorage read/write with schema versioning, field validation, legacy `taa: boolean` → `aaMode` migration, and a trailing-edge debounced saver (+ `flush()` for pagehide). |
 
@@ -96,20 +97,23 @@ offset  16 │ n_d, V_d, sampleCount, refractionStrength           (16 B)
 offset  32 │ jitter, refractionMode, pillCount, applySrgbOetf    (16 B)
 offset  48 │ shape, time, historyBlend, heroLambda               (16 B)
 offset  64 │ cameraZ, projection, debugProxy, taaEnabled         (16 B)
-offset  80 │ cubeRot:      mat3x3<f32>                           (48 B)
-offset 128 │ cubeRotPrev:  mat3x3<f32>                           (48 B)
-offset 176 │ plateRot:     mat3x3<f32>                           (48 B)
-offset 224 │ plateRotPrev: mat3x3<f32>                           (48 B)
-offset 272 │ waveAmp, waveFreq, waveLipFactor, sceneTime         (16 B)
-offset 288 │ pills[0..8]   each pill is:                         (32 B each)
+offset  80 │ cubeRot:        mat3x3<f32>                         (48 B)
+offset 128 │ cubeRotPrev:    mat3x3<f32>                         (48 B)
+offset 176 │ plateRot:       mat3x3<f32>                         (48 B)
+offset 224 │ plateRotPrev:   mat3x3<f32>                         (48 B)
+offset 272 │ diamondRot:     mat3x3<f32>                         (48 B)
+offset 320 │ diamondRotPrev: mat3x3<f32>                         (48 B)
+offset 368 │ waveAmp, waveFreq, waveLipFactor, sceneTime         (16 B)
+offset 384 │ diamondSize, _pad × 3                               (16 B)
+offset 400 │ pills[0..8]     each pill is:                       (32 B each)
            │   center.xyz, edgeR,   halfSize.xyz, _pad
 ```
 
-Total 544 bytes (80 B head + 4 × 48 B rotation matrices + 16 B plate
-wave/scene-time block + 8 × 32 B pills). Uniform size is fixed — pills
-beyond `pillCount` are zeros.
+Total 656 bytes (80 B head + 6 × 48 B rotation matrices + 16 B plate
+wave/scene-time block + 16 B diamond params block + 8 × 32 B pills).
+Uniform size is fixed — pills beyond `pillCount` are zeros.
 
-- `shape` selects the SDF (0=pill, 1=prism, 2=cube, 3=plate).
+- `shape` selects the SDF (0=pill, 1=prism, 2=cube, 3=plate, 4=diamond).
 - `time` is the noise stream — wall-clock seconds, always advancing so TAA
   jitter and wavelength stratification keep decorrelating across frames
   even while the scene is paused.
