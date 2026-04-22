@@ -1,4 +1,5 @@
 import { Pane } from 'tweakpane';
+import type { PerfStats } from './perfStats';
 
 /** Perspective FOV slider / persistence bounds, in degrees.
  *  Anything outside the range drives `cameraZ = (height/2) / tan(fov/2)` into
@@ -121,11 +122,19 @@ const PRESETS: readonly Preset[] = [
   },
 ];
 
+export type PerfBinding = {
+  /** Live-updating object the loop writes into; the panel polls it. */
+  stats: PerfStats;
+  /** Adapter exposes timestamp queries — gates the GPU ms graph in the UI. */
+  hasGpuTiming: boolean;
+};
+
 export function initUi(
   params: Params,
   reloadPhoto:      () => void,
   onChange:         () => void,
   markSceneChanged: () => void = () => {},
+  perf:             PerfBinding | null = null,
 ): Pane {
   const pane = new Pane({ title: 'Spectral Dispersion', expanded: true });
 
@@ -185,6 +194,39 @@ export function initUi(
       markSceneChanged();
       onChange();
     });
+  }
+
+  // Live perf monitor — fed by the render loop via the `perf.stats` object.
+  // Tweakpane's monitor bindings poll the fields directly (interval ms below),
+  // so neither the loop nor the UI has to call `pane.refresh()`.
+  if (perf) {
+    const monitor = pane.addFolder({ title: 'Perf', expanded: true });
+    monitor.addBinding(perf.stats, 'fps', {
+      readonly: true,
+      label:    'FPS',
+      view:     'graph',
+      min:      0,
+      max:      120,
+      interval: 250,
+    });
+    monitor.addBinding(perf.stats, 'cpuMs', {
+      readonly: true,
+      label:    'CPU ms',
+      view:     'graph',
+      min:      0,
+      max:      33,
+      interval: 250,
+    });
+    if (perf.hasGpuTiming) {
+      monitor.addBinding(perf.stats, 'gpuMs', {
+        readonly: true,
+        label:    'GPU ms',
+        view:     'graph',
+        min:      0,
+        max:      16,
+        interval: 250,
+      });
+    }
   }
 
   // `ev.last === true` marks a committed value (slider release, dropdown pick,

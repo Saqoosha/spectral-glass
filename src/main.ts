@@ -8,6 +8,7 @@ import { defaultParams, initUi, mergeParams, type Params } from './ui';
 import { cameraZForFov } from './math/camera';
 import { createHistory, resizeHistory } from './webgpu/history';
 import { loadStored, debouncedSaver } from './persistence';
+import { createPerfStats, makeFrameTimer } from './perfStats';
 
 function showFatal(message: string): void {
   const fb = document.getElementById('fallback');
@@ -104,7 +105,15 @@ async function main(): Promise<void> {
       showNotice(`Photo reload failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
-  initUi(params, () => { void reloadPhoto(); }, persist, markSceneChanged);
+  // Live perf stats — written by the render loop, read by the UI panel via
+  // tweakpane monitor bindings (no manual refresh needed).
+  const perfStats = createPerfStats();
+  const tickFrameTimer = makeFrameTimer(perfStats);
+
+  initUi(params, () => { void reloadPhoto(); }, persist, markSceneChanged, {
+    stats:        perfStats,
+    hasGpuTiming: ctx.hasTimestamp,
+  });
 
   // Flush any pending debounced save on page hide so a drag-then-close doesn't
   // lose the last drag position.
@@ -151,16 +160,18 @@ async function main(): Promise<void> {
   const applySrgbOetf = needsSrgbOetf(ctx.format);
   const startTime     = performance.now();
 
-  // Opt-in perf HUD: `?perf=1` + `hasTimestamp` enables GPU timestamp queries
-  // and a small overlay that exposes `window._perf` so benchmark scripts can
-  // read average GPU time without needing a protocol-level hook.
-  const perfEnabled = ctx.hasTimestamp && new URLSearchParams(location.search).has('perf');
-  const perf        = perfEnabled ? createPerf(ctx.device) : null;
+  // GPU timestamp queries — always on when the adapter supports them so the
+  // perf monitor in the UI has live data without a URL flag. `?perf=1` still
+  // exposes `window._perf` for external benchmark scripts that want raw
+  // sample arrays.
+  const perf        = ctx.hasTimestamp ? createPerf(ctx.device) : null;
+  const perfHud     = ctx.hasTimestamp && new URLSearchParams(location.search).has('perf');
   const perfWindow: { samples: number[]; lastMs: number } = { samples: [], lastMs: 0 };
-  (window as unknown as { _perf?: typeof perfWindow })._perf = perfEnabled ? perfWindow : undefined;
+  (window as unknown as { _perf?: typeof perfWindow })._perf = perfHud ? perfWindow : undefined;
 
   const loop = () => {
     try {
+      tickFrameTimer();
       const { width, height } = resizeCanvas(ctx.canvas, ctx.dpr);
       const resized = resizeHistory(ctx.device, history, width, height);
       if (resized !== history) {
@@ -218,9 +229,12 @@ async function main(): Promise<void> {
       if (perf) {
         void perf.readMs().then((ms) => {
           if (ms === null || !Number.isFinite(ms)) return;
-          perfWindow.lastMs = ms;
-          perfWindow.samples.push(ms);
-          if (perfWindow.samples.length > 240) perfWindow.samples.shift();
+          perfStats.gpuMs = ms;
+          if (perfHud) {
+            perfWindow.lastMs = ms;
+            perfWindow.samples.push(ms);
+            if (perfWindow.samples.length > 240) perfWindow.samples.shift();
+          }
         });
       }
     } catch (err) {
