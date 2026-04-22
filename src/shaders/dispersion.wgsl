@@ -85,11 +85,12 @@ struct Frame {
   // Diamond parameters. `diamondSize` is the girdle diameter in pixels — the
   // sdfDiamond SDF scales all facet offsets by this at eval time so one uniform
   // covers every diamond in the scene (all instances share the size slider).
-  // Remaining three slots are reserved for future diamond controls (star
-  // angle override, crown angle override) and kept zeroed by the host so a
-  // layout bump isn't required when Phase B wires them up.
+  // `diamondWireframe` toggles a facet-edge overlay in the fragment shader
+  // for debugging the cut geometry — 1.0 = on, 0.0 = off. The remaining two
+  // slots are reserved for future diamond controls (e.g., star/crown angle
+  // overrides) and kept zeroed by the host.
   diamondSize:        f32,
-  _diamondPad0:       f32,
+  diamondWireframe:   f32,
   _diamondPad1:       f32,
   _diamondPad2:       f32,
   pills:              array<PillGpu, MAX_PILLS>,
@@ -1351,8 +1352,22 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
     blend = mix(blend, vec3<f32>(1.0, 0.3, 0.7), 0.2);
   }
 
+  // Diamond facet wireframe overlay — helpful for cross-checking the cut
+  // geometry against a real brilliant-cut reference. Uses the plane-gap
+  // trick from `sdfDiamondEdgeWeight`: the SDF's top two facet distances
+  // are almost equal exactly on a facet boundary. Writes the overlay to
+  // the display-output colour but NOT to the history texture, so the
+  // overlay doesn't accumulate into TAA / history EMA and muddy itself
+  // on subsequent frames.
+  var display = blend;
+  if (isDiamond && frame.diamondWireframe > 0.5) {
+    let pillCenter = frame.pills[analyticIdx].center;
+    let edgeW      = sdfDiamondEdgeWeight(h.p - pillCenter, frame.diamondSize);
+    display = mix(display, vec3<f32>(1.0, 0.25, 0.25), edgeW * 0.85);
+  }
+
   var o: FsOut;
-  o.color   = vec4<f32>(blend, 1.0);
+  o.color   = vec4<f32>(display, 1.0);
   o.history = vec4<f32>(blend, 1.0);
   return o;
 }

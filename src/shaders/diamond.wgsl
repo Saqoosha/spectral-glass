@@ -85,6 +85,65 @@ fn sdfDiamond(pIn: vec3<f32>, diameter: f32) -> f32 {
 }
 
 // -----------------------------------------------------------------------------
+// Facet-edge weight — debug overlay
+// -----------------------------------------------------------------------------
+//
+// Returns an edge intensity in [0, 1] for a local-space surface point.
+// 1.0 at facet boundaries (two plane SDFs equidistant, i.e. the point sits
+// on the edge between two facets); 0.0 in facet interiors. Used by fs_main
+// to draw a wireframe overlay when `frame.diamondWireframe` is on —
+// useful for cross-checking that the cut geometry matches a real round
+// brilliant reference.
+//
+// Strategy: evaluate the same 7 plane distances as sdfDiamond, find the
+// MAX (= the "outer" facet at this point — the surface plane) and the
+// SECOND-MAX (= the facet that would take over if you stepped outward).
+// The smaller the gap, the closer to the edge between them. Smoothstep
+// the gap against a pixel-scale threshold so edges render ~1 px wide at
+// typical diamond sizes.
+fn sdfDiamondEdgeWeight(pIn: vec3<f32>, diameter: f32) -> f32 {
+  // Same fold as sdfDiamond — keep them in sync if the fold ever changes.
+  let p0 = frame.diamondRot * pIn;
+  var q = abs(p0.xy);
+  if (q.y > q.x) { q = q.yx; }
+  let nRefl = vec2<f32>(-0.3826834324, 0.9238795325);
+  let d     = dot(q, nRefl);
+  if (d > 0.0) { q = q - 2.0 * d * nRefl; }
+  let p = vec3<f32>(q, p0.z);
+  let r = length(q);
+
+  let d_table    = p.z - DIAMOND_H_TOP * diameter;
+  let d_bezel    = dot(p, DIAMOND_BEZEL_N)      - DIAMOND_BEZEL_O      * diameter;
+  let d_star     = dot(p, DIAMOND_STAR_N)       - DIAMOND_STAR_O       * diameter;
+  let d_uhalf    = dot(p, DIAMOND_UPPER_HALF_N) - DIAMOND_UPPER_HALF_O * diameter;
+  let d_girdle   = r                            - DIAMOND_R_GIRDLE     * diameter;
+  let d_lhalf    = dot(p, DIAMOND_LOWER_HALF_N) - DIAMOND_LOWER_HALF_O * diameter;
+  let d_pavmain  = dot(p, DIAMOND_PAVILION_N)   - DIAMOND_PAVILION_O   * diameter;
+
+  let maxD = max(max(max(d_table, d_bezel), max(d_star, d_uhalf)),
+                 max(d_girdle, max(d_lhalf, d_pavmain)));
+
+  // Second-max: replace any value equal to maxD with a very negative
+  // sentinel, then re-max. The ">= maxD" comparison tolerates the single
+  // tied value but correctly excludes only the true maximum.
+  let NEG: f32 = -1e9;
+  let d2_table   = select(d_table,   NEG, d_table   >= maxD);
+  let d2_bezel   = select(d_bezel,   NEG, d_bezel   >= maxD);
+  let d2_star    = select(d_star,    NEG, d_star    >= maxD);
+  let d2_uhalf   = select(d_uhalf,   NEG, d_uhalf   >= maxD);
+  let d2_girdle  = select(d_girdle,  NEG, d_girdle  >= maxD);
+  let d2_lhalf   = select(d_lhalf,   NEG, d_lhalf   >= maxD);
+  let d2_pavmain = select(d_pavmain, NEG, d_pavmain >= maxD);
+  let secondD = max(max(max(d2_table, d2_bezel), max(d2_star, d2_uhalf)),
+                    max(d2_girdle, max(d2_lhalf, d2_pavmain)));
+
+  // Gap in world-space units (pixels since the diamond is sized in pixels).
+  // 1.5 px smoothstep gives a crisp single-pixel line with soft anti-alias.
+  let gap = maxD - secondD;
+  return 1.0 - smoothstep(0.0, 1.5, gap);
+}
+
+// -----------------------------------------------------------------------------
 // Pill picker for TAA reprojection
 // -----------------------------------------------------------------------------
 //

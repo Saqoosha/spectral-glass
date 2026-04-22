@@ -86,6 +86,7 @@ function validateParams(u: unknown): Partial<Params> {
   // invert the polytope SDF into a degenerate shape, and a huge value would
   // blow the proxy AABB past the viewport.
   if (isFiniteNumber(p.diamondSize))     out.diamondSize    = clamp(p.diamondSize, DIAMOND_SIZE_MIN, DIAMOND_SIZE_MAX);
+  if (typeof p.diamondWireframe === 'boolean') out.diamondWireframe = p.diamondWireframe;
   return out;
 }
 

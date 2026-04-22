@@ -95,6 +95,11 @@ export type Params = {
   // Phase B territory); per-instance POSITIONS are still independent via the
   // pills array's cx/cy.
   diamondSize: number;
+  // Diamond-only debug overlay: when true, fs_main draws the cut's facet
+  // edges on top of the refracted rendering so the geometry can be
+  // cross-checked against a real brilliant cut reference. Uses the SDF's
+  // plane-difference trick (two planes equidistant = facet boundary).
+  diamondWireframe: boolean;
 };
 
 type Preset = {
@@ -288,6 +293,11 @@ export function initUi(
   const diamondSizeBinding = shape.addBinding(params, 'diamondSize', {
     min: DIAMOND_SIZE_MIN, max: DIAMOND_SIZE_MAX, step: 1, label: 'Size',
   });
+  // Diamond-only: facet-wireframe debug overlay. Useful for eyeballing
+  // whether the SDF's cut lines match a reference brilliant cut.
+  const diamondWireframeBinding = shape.addBinding(params, 'diamondWireframe', {
+    label: 'Wireframe',
+  });
 
   // Show the right subset of sliders for each shape. Pill/prism use all three
   // X/Y/Z; cube collapses into a single Size slider (halfSize must stay equal
@@ -311,7 +321,8 @@ export function initUi(
     edgeBinding.hidden       = isDiamond;  // plate uses edgeR as its rim radius; diamond wants sharp facets, no rounding
     waveAmpBinding.hidden    = !isPlate;
     waveLenBinding.hidden    = !isPlate;
-    diamondSizeBinding.hidden = !isDiamond;
+    diamondSizeBinding.hidden      = !isDiamond;
+    diamondWireframeBinding.hidden = !isDiamond;
     if (isCube) {
       // Average the three dims to seed Size — covers the case where shape
       // was just switched from pill/prism with non-equal extents.
@@ -468,6 +479,7 @@ export function defaultParams(): Params {
     waveAmp: 20,
     waveWavelength: 300,
     diamondSize: 200,
+    diamondWireframe: false,
   };
 }
 

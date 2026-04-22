@@ -359,6 +359,7 @@ async function main(): Promise<void> {
         // the current shape isn't diamond, but the uniform slot is always
         // written so shape switching doesn't leave stale values.
         diamondSize:        params.diamondSize,
+        diamondWireframe:   params.diamondWireframe,
         pills,
       });
 

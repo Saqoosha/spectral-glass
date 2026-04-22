@@ -28,6 +28,7 @@ export type FrameParams = {
   readonly waveAmp:            number;  // plate: displacement amplitude (px). Ignored for other shapes.
   readonly waveFreq:           number;  // plate: angular frequency (rad/px). Wavelength ≈ 2π/waveFreq.
   readonly diamondSize:        number;  // diamond: girdle diameter (px). Ignored for other shapes.
+  readonly diamondWireframe:   boolean; // diamond: overlay facet edges on top of the rendering for debugging.
   readonly pills:              readonly Pill[];
 };
 
@@ -140,12 +141,13 @@ export function writeFrame(device: GPUDevice, buf: GPUBuffer, p: FrameParams): v
   scratch[plateParamsBase + 2] = 1 / Math.sqrt(1 + ampFreq * ampFreq);
   scratch[plateParamsBase + 3] = p.sceneTime;
 
-  // Diamond params: single scalar for now (girdle diameter). The surrounding
+  // Diamond params: girdle diameter + debug wireframe flag. The surrounding
   // 16-B block keeps the pills array at its natural 16-byte alignment so
   // WGSL's array-of-struct layout rules hold without per-element padding.
   const diamondParamsBase = plateParamsBase + PLATE_PARAMS_FLOATS;
   scratch[diamondParamsBase + 0] = p.diamondSize;
-  // slots 1..3 left at scratch.fill(0)'s zero — reserved for future diamond
+  scratch[diamondParamsBase + 1] = p.diamondWireframe ? 1 : 0;
+  // slots 2..3 left at scratch.fill(0)'s zero — reserved for future diamond
   // parameters (star angle, crown angle overrides) without another layout bump.
 
   const pillBase  = diamondParamsBase + DIAMOND_PARAMS_FLOATS;

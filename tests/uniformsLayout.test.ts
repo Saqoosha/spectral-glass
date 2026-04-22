@@ -78,7 +78,7 @@ describe('uniform layout drift detector', () => {
       'diamondRot',
       'diamondRotPrev',
       'waveAmp', 'waveFreq', 'waveLipFactor', 'sceneTime',
-      'diamondSize', '_diamondPad0', '_diamondPad1', '_diamondPad2',
+      'diamondSize', 'diamondWireframe', '_diamondPad1', '_diamondPad2',
       'pills',
     ]);
   });
