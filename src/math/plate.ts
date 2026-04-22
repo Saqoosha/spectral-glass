@@ -4,13 +4,20 @@
  * Composition: Rx(t·0.30) * Ry(t·0.20). We rotate around Y first (gentle yaw)
  * and then around X (pitch over), so a flat plate facing the camera tilts
  * upward while slowly turning — a "floating paper" motion that reads more
- * organic than a single-axis spin. Rates are chosen as an irrational ratio
- * so the combined orientation doesn't loop visibly within a ~1 min window.
+ * organic than a single-axis spin. Rates are coprime small integers (2:3),
+ * giving a strict period of 2π / gcd(0.20, 0.30) ≈ 63 s — long enough that
+ * the combined orientation reads as non-looping within a typical viewing
+ * window.
  *
  * Output matches cubeRotationColumns: three vec3 columns each aligned to
  * 16 B (12 floats total, with indices 3/7/11 kept zero).
  */
 export function plateRotationColumns(time: number): Float32Array {
+  // Same NaN/±Infinity guard as cubeRotationColumns — without it the rotation
+  // matrix gets poisoned with NaN, slips into the GPU uniform, and is then
+  // silently "healed" at the far end by the shader's degenerate-normal
+  // fallback (visible visual corruption instead of a hard failure). Catch
+  // here while the call site is still on the stack.
   if (!Number.isFinite(time)) {
     throw new Error(`plateRotationColumns: time must be finite, got ${time}`);
   }

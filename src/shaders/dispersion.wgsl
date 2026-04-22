@@ -22,16 +22,18 @@ struct Frame {
   pillCount:          f32,
   applySrgbOetf:      f32,  // 1.0 if canvas is non-sRGB and we must encode; 0.0 if -srgb
   shape:              f32,  // 0 = pill (stadium), 1 = prism, 2 = cube (rotates), 3 = plate (wavy, tumbles)
-  time:               f32,  // seconds since start. GPU uses it for the jitter hash seed; the host derives `cubeRot` from the same value every frame.
+  time:               f32,  // wall-clock seconds since start (always advancing, even while paused). Drives the noise streams: TAA sub-pixel jitter and per-pixel wavelength stratification. Rotation matrices are derived from `sceneTime` (below), NOT from this field — see `cubeRot` / `plateRot` and the time-stream split in src/main.ts.
   historyBlend:       f32,  // 0.2 steady state, 1.0 when the scene changed this frame
   heroLambda:         f32,  // jittered each frame in [380,700]; Hero mode uses this
   cameraZ:            f32,  // distance from screen plane (z=0) to camera, in pixels
   projection:         f32,  // 0 = orthographic, 1 = perspective
   debugProxy:         f32,  // 1 = tint every proxy fragment pink (debug view)
   taaEnabled:         f32,  // 1 = jitter ray origin within the pixel so history EMA antialiases shader-decided silhouettes
-  // Cube rotation (rz·rx composed on the host from `time` — see
-  // src/math/cube.ts). Uploaded as a uniform so every cube SDF evaluation is
-  // just one mat-vec instead of four cos/sin. With cubeAnalyticExit replacing
+  // Cube rotation (rz·rx composed on the host from `sceneTime` — see
+  // src/math/cube.ts). Driven by the scene/motion stream so "Stop the world"
+  // freezes the tumble while the noise stream (`time`) keeps advancing AA.
+  // Uploaded as a uniform so every cube SDF evaluation is just one mat-vec
+  // instead of four cos/sin. With cubeAnalyticExit replacing
   // the per-wavelength inside-trace, the cube path's remaining sdfCube traffic
   // is sphereTrace (up to 64 iters) + the front sceneNormal (6 evals), each
   // going through sceneSdf which scans all live pills, plus a per-pill scan
@@ -46,9 +48,11 @@ struct Frame {
   // point one frame ago, so the history read follows the rotating cube's
   // surface instead of smearing stale neighboring pixels into it.
   cubeRotPrev:        mat3x3<f32>,
-  // Plate rotation (rx·ry composed on the host from `time` — see
-  // src/math/plate.ts). Used by sdfWavyPlate for both SDF evaluation and by
-  // vs_proxy to rotate the proxy bounding box so it stays tight (cube-style).
+  // Plate rotation (rx·ry composed on the host from `sceneTime` — see
+  // src/math/plate.ts). Same scene/motion-stream gating as `cubeRot` above,
+  // so paused plates freeze too. Used by sdfWavyPlate for both SDF evaluation
+  // and by vs_proxy to rotate the proxy bounding box so it stays tight
+  // (cube-style).
   plateRot:           mat3x3<f32>,
   // Previous frame's plate rotation. Analogous to cubeRotPrev above — feeds
   // the TAA reprojection path so tumbling plates also keep sharp refracted
@@ -140,14 +144,16 @@ fn sdfPrism(p: vec3<f32>, halfSize: vec3<f32>, edgeR: f32) -> f32 {
 // src/math/plate.ts) — same trick as cubeRot, saves four cos/sin per SDF eval.
 //
 // The returned distance is scaled by `frame.waveLipFactor` (computed on the
-// host as 1/sqrt(1 + 2·(amp·freq)²)) because the z-shift breaks the Lipschitz
+// host as 1/sqrt(1 + (amp·freq)²)) because the z-shift breaks the Lipschitz
 // constant along x/y: the shifted SDF has gradient magnitude
 // sqrt(1 + (∂waveZ/∂x)² + (∂waveZ/∂y)²) which grows with amp·freq. Dividing
-// by that bound keeps raymarch steps safely inside the true distance so the
-// trace never tunnels through the thin slab, while staying as aggressive as
-// the current wave parameters allow (~0.86 at defaults, previously a
-// conservative hardcoded 0.6 — ≈45% fewer sphereTrace steps at the same
-// safety margin).
+// by that tight bound — see the derivation in src/webgpu/uniforms.ts on why
+// max(|∇waveZ|²) = (amp·k)², NOT 2·(amp·k)² — keeps raymarch steps safely
+// inside the true distance so the trace never tunnels through the thin slab,
+// while staying as aggressive as the current wave parameters allow (~0.92 at
+// defaults, previously a conservative hardcoded 0.6 — ≈35% fewer sphereTrace
+// steps at the same safety margin, or equivalently ≈53% more progress per
+// step).
 fn sdfWavyPlate(pIn: vec3<f32>, halfSize: vec3<f32>) -> f32 {
   let p = frame.plateRot * pIn;
 
@@ -707,15 +713,24 @@ fn reprojectHit(hitWorld: vec3<f32>, fragCoord: vec2<f32>, pillIdx: u32, shapeId
 
   let prevPx = worldToScreenPx(prevWorld);
   let currPx = worldToScreenPx(hitWorld);
+  // Behind-camera fallback: if the rotation moved the hit point through the
+  // near plane between frames (rare — needs a fast tumble + perspective
+  // mode), there's no meaningful history pixel to reproject from. Falling
+  // back to `fallbackUv` reads stale history at the current pixel; under
+  // the steady-state α = 0.2 EMA that washes out in ~5 frames. The pause
+  // path can't hit this because plateRot == plateRotPrev when paused, so
+  // the reprojection collapses to identity and prevPx == currPx — safe.
   if (prevPx.z <= 0.0 || currPx.z <= 0.0) { return fallbackUv; }
 
-  // Jitter cancels here because both projections used the same jittered
-  // hitWorld; the delta is pure world-motion screen-space displacement.
+  // Jitter cancels in the screen-space delta to first order. Strictly the
+  // perspective divide is non-linear in p.z, so there's a ~jitter·rotation
+  // residual on the order of jitter (≤ 0.5 px) × per-frame rotation
+  // (≈ 0.005 rad at default tumble) ≈ 0.0025 px — well below the pixel
+  // grid, invisible after EMA.
   let motionPx = prevPx.xy - currPx.xy;
   let prevUv   = (fragCoord + motionPx) / frame.resolution;
-  // Disocclusion: the point was outside the screen a frame ago, so there's
-  // no meaningful history for it. Fall back to the unreprojected read and
-  // let EMA fade in fresh data over the next ~5 frames.
+  // Disocclusion: the point was outside the screen a frame ago. Same
+  // fallback strategy — read stale and let EMA fade in fresh data.
   if (any(prevUv < vec2<f32>(0.0)) || any(prevUv > vec2<f32>(1.0))) {
     return fallbackUv;
   }

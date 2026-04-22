@@ -1,4 +1,8 @@
-import { FOV_MIN, FOV_MAX, type Params } from './ui';
+import {
+  EDGE_R_MAX, EDGE_R_MIN, FOV_MAX, FOV_MIN,
+  WAVE_AMP_MAX, WAVE_AMP_MIN, WAVE_WAVELENGTH_MAX, WAVE_WAVELENGTH_MIN,
+  type Params,
+} from './ui';
 import type { Pill } from './pills';
 
 const KEY     = 'realrefraction:config';
@@ -40,19 +44,23 @@ function validateParams(u: unknown): Partial<Params> {
   if (isFiniteNumber(p.pillLen))            out.pillLen            = p.pillLen;
   if (isFiniteNumber(p.pillShort))          out.pillShort          = p.pillShort;
   if (isFiniteNumber(p.pillThick))          out.pillThick          = p.pillThick;
-  if (isFiniteNumber(p.edgeR))              out.edgeR              = p.edgeR;
+  if (isFiniteNumber(p.edgeR))              out.edgeR              = clamp(p.edgeR, EDGE_R_MIN, EDGE_R_MAX);
   if (isFiniteNumber(p.refractionStrength)) out.refractionStrength = p.refractionStrength;
   if (typeof p.temporalJitter === 'boolean') out.temporalJitter    = p.temporalJitter;
   if (typeof p.debugProxy === 'boolean')     out.debugProxy        = p.debugProxy;
   if (typeof p.taa === 'boolean')            out.taa               = p.taa;
   if (typeof p.paused === 'boolean')         out.paused            = p.paused;
-  // Plate wave controls. Clamp defensively: amp below zero is meaningless;
-  // wavelength of 1 px or less blows up the angular-frequency conversion in
-  // main.ts (2π/λ) and would push the shader's Lipschitz margin over the
-  // edge.
-  if (isFiniteNumber(p.waveAmp))         out.waveAmp        = Math.max(0, p.waveAmp);
-  if (isFiniteNumber(p.waveWavelength))  out.waveWavelength = Math.max(2, p.waveWavelength);
+  // Plate wave controls. Clamp to UI slider bounds so a hand-edited storage
+  // can't push waveLipFactor (1/sqrt(1 + (amp·freq)²)) toward zero — that
+  // would stall sphereTrace per fragment (visible black plate). The slider
+  // ranges in ui.ts are the source of truth; persistence mirrors them.
+  if (isFiniteNumber(p.waveAmp))         out.waveAmp        = clamp(p.waveAmp, WAVE_AMP_MIN, WAVE_AMP_MAX);
+  if (isFiniteNumber(p.waveWavelength))  out.waveWavelength = clamp(p.waveWavelength, WAVE_WAVELENGTH_MIN, WAVE_WAVELENGTH_MAX);
   return out;
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.min(Math.max(v, lo), hi);
 }
 
 function validatePills(u: unknown): Pill[] | null {

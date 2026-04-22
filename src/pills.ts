@@ -30,16 +30,27 @@ type DragState =
   | { kind: 'dragging'; pillIndex: number; offsetX: number; offsetY: number; pointerId: number };
 
 /**
- * Shape IDs mirror `SHAPE_ID` in main.ts / WGSL: 0 pill, 1 prism, 2 cube.
- * `getShapeId` lets the drag layer tune hit testing without owning render state.
+ * Shape IDs mirror `SHAPE_ID` in main.ts / WGSL: 0 pill, 1 prism, 2 cube,
+ * 3 plate. `getShapeId` lets the drag layer tune hit testing without owning
+ * render state.
  */
 export type ShapeIdFn = () => number;
+
+/**
+ * Extra hit-radius margin for shapes whose visible silhouette extends beyond
+ * `halfSize` (currently just plate, where the wavy surface bulges out by
+ * `waveAmp` px in the Z direction that rotates into view). Returning 0 keeps
+ * the existing tight bound for cube. main.ts wires this to `params.waveAmp`
+ * so the drag region tracks the slider live.
+ */
+export type WaveMarginFn = () => number;
 
 export function attachDrag(
   canvas: HTMLCanvasElement,
   pills: Pill[],
   dpr: number,
   getShapeId: ShapeIdFn = () => 0,
+  getWaveMargin: WaveMarginFn = () => 0,
 ): () => void {
   let state: DragState = { kind: 'idle' };
 
@@ -53,8 +64,11 @@ export function attachDrag(
   //   cube / plate (shape 2 / 3): circular radius, because the rotating /
   //                               tumbling silhouette changes over time —
   //                               a circle around the center always contains
-  //                               the visible footprint (plate adds `edgeR`
-  //                               as wave amplitude margin).
+  //                               the visible footprint. Plate adds the
+  //                               wave-amp margin from `getWaveMargin()`
+  //                               (NOT pill.edgeR — the UI hides edgeR for
+  //                               plates, so its persisted value is unrelated
+  //                               to the actual wave amplitude on the GPU).
   const findHit = (x: number, y: number): number => {
     const shapeId = getShapeId();
     for (let i = pills.length - 1; i >= 0; i--) {
@@ -62,7 +76,7 @@ export function attachDrag(
       const dx = x - p.cx;
       const dy = y - p.cy;
       if (shapeId === 2 || shapeId === 3) {
-        const r = Math.max(p.hx, p.hy, p.hz) + (shapeId === 3 ? p.edgeR : 0);
+        const r = Math.max(p.hx, p.hy, p.hz) + (shapeId === 3 ? getWaveMargin() : 0);
         if (dx * dx + dy * dy <= r * r) return i;
       } else {
         if (Math.abs(dx) <= p.hx && Math.abs(dy) <= p.hy) return i;

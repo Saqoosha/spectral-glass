@@ -12,7 +12,7 @@ final color via CIE 1931 color matching functions.
 ![Cubes over rooftops](docs/images/demo-default.png)
 
 Above: four rotating glass cubes (Rainbow soap material, `n_d = 1.272`,
-`V_d = 1.5`, perspective FOV 46°, N = 32) over a grayscale Picsum photo.
+`V_d = 2.0`, perspective FOV 60°, N = 16) over a grayscale Picsum photo.
 A monochrome background lets you see the per-wavelength dispersion as pure
 spectral colors instead of mixing with the photo's own chroma — every band
 on the cube is the shader splitting the photo by wavelength in real time at
@@ -114,8 +114,12 @@ every proxy fragment pink and see the rasterised silhouette.
 - **Temporal accumulation.** `rgba16float` ping-pong history with EMA blend
   (α = 0.2 steady-state, 1.0 for one frame after a scene change so cube
   tail doesn't ghost in). When **Stop the world** freezes the scene, the
-  blend switches to progressive averaging (α = 1/n) so noise drops as 1/√n
-  toward zero — paused scenes converge to a noise-free image.
+  blend switches to progressive averaging α = max(1/n, 1/256) — noise
+  drops as 1/√n in the convergence ramp and bottoms out at a 256-sample
+  sliding window (~6 % residual). The 1/256 floor is required by fp16
+  precision so that small new-sample contributions don't round to zero
+  and slowly fade silhouettes to black; see `main.ts pausedFrames` for
+  the full derivation.
 - **Temporal AA with motion-vector reprojection.** Each frame's primary
   ray is sub-pixel-jittered by a per-pixel hash; history is read at
   `fragCoord + (projected_prev_world − projected_curr_world)` so the
@@ -156,7 +160,7 @@ src/
 │   └── uniforms.ts             Typed uniform buffer writer
 └── shaders/
     ├── fullscreen.wgsl         Fullscreen triangle vertex shader
-    └── dispersion.wgsl         SDFs (pill/prism/cube) + spectral dispersion fragment
+    └── dispersion.wgsl         SDFs (pill/prism/cube/plate) + analytic exits + TAA reprojection + spectral dispersion fragment
 
 tests/                          Vitest unit tests for each math module
 docs/
@@ -164,8 +168,9 @@ docs/
 ```
 
 Math modules in `src/math/` are mirrored 1:1 by functions in
-`src/shaders/dispersion.wgsl` — the 31 vitest tests act as the reference
-implementation for the shader.
+`src/shaders/dispersion.wgsl` — the vitest suite (~50 tests, exact count
+drifts as cases are added) acts as the reference implementation for the
+shader.
 
 ## Design
 

@@ -39,7 +39,7 @@ export type FrameParams = {
 //   offset 128: cubeRotPrev  mat3x3<f32>                          (48 B)
 //   offset 176: plateRot     mat3x3<f32>                          (48 B)
 //   offset 224: plateRotPrev mat3x3<f32>                          (48 B)
-//   offset 272: waveAmp, waveFreq, waveLipFactor, _padWave1       (16 B)
+//   offset 272: waveAmp, waveFreq, waveLipFactor, sceneTime       (16 B)
 //   offset 288: pills[0..MAX_PILLS] — each pill is vec3 + f32 + vec3 + f32 (32 B)
 const HEAD_FLOATS           = 20;                                   // 80 B
 const CUBE_ROT_FLOATS       = 12;                                   // 48 B (3 padded cols)
@@ -54,7 +54,8 @@ const TOTAL_FLOATS    = HEAD_FLOATS
                        + PLATE_PARAMS_FLOATS + PILL_FLOATS * MAX_PILLS;
 const TOTAL_BYTES     = TOTAL_FLOATS * 4;
 
-// Reused across frames so we don't allocate a 384-byte Float32Array every tick.
+// Reused across frames so we don't allocate a fresh Float32Array every tick.
+// Total size grows with the field set — see TOTAL_BYTES above (currently 544 B).
 const scratch = new Float32Array(TOTAL_FLOATS);
 
 export function createFrameBuffer(device: GPUDevice): GPUBuffer {
@@ -104,17 +105,27 @@ export function writeFrame(device: GPUDevice, buf: GPUBuffer, p: FrameParams): v
   scratch.set(plateRotationColumns(p.prevSceneTime), base); base += PLATE_ROT_PREV_FLOATS;
 
   // Plate wave parameters: amp (px), freq (rad/px), and the precomputed
-  // Lipschitz safety factor `1/sqrt(1 + 2·(amp·freq)²)` that sdfWavyPlate
+  // Lipschitz safety factor `1/sqrt(1 + (amp·freq)²)` that sdfWavyPlate
   // multiplies into its output. Hoisting the factor here saves an inverseSqrt
   // on every SDF evaluation (up to ~70 per fragment on the plate path) since
-  // both amp and freq are uniform across the frame. Trailing slot is
-  // `sceneTime` (same as what drives the rotations — wave phase freezes
-  // together with the tumble when paused).
+  // both amp and freq are uniform across the frame.
+  //
+  // Derivation: the shifted SDF reads `box(p with z ← p.z − waveZ)`, whose
+  // gradient magnitude is sqrt(1 + (∂waveZ/∂x)² + (∂waveZ/∂y)²). With
+  // waveZ = amp·sin(kx+φ)·sin(ky+φ), the partials are amp·k·cos(kx+φ)·sin(ky+φ)
+  // and amp·k·sin(kx+φ)·cos(ky+φ). Substituting a = cos²(kx+φ), b = cos²(ky+φ)
+  // and maximizing a + b − 2ab over the unit square pins the maximum at the
+  // corners (a, b) = (1, 0) or (0, 1) where it evaluates to 1, NOT 2 — the
+  // partials never reach amp·k simultaneously. So the tight bound on
+  // |∇waveZ|² is (amp·k)², not 2·(amp·k)².
+  //
+  // Trailing slot is `sceneTime` (same as what drives the rotations — wave
+  // phase freezes together with the tumble when paused).
   const plateParamsBase = base;
   const ampFreq         = p.waveAmp * p.waveFreq;
   scratch[plateParamsBase + 0] = p.waveAmp;
   scratch[plateParamsBase + 1] = p.waveFreq;
-  scratch[plateParamsBase + 2] = 1 / Math.sqrt(1 + 2 * ampFreq * ampFreq);
+  scratch[plateParamsBase + 2] = 1 / Math.sqrt(1 + ampFreq * ampFreq);
   scratch[plateParamsBase + 3] = p.sceneTime;
 
   const pillBase  = plateParamsBase + PLATE_PARAMS_FLOATS;

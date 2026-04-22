@@ -7,6 +7,31 @@ import type { PerfStats } from './perfStats';
 export const FOV_MIN = 20;
 export const FOV_MAX = 120;
 
+/** Plate wave-amplitude bounds (px). Mirrors the slider range below.
+ *  Persistence clamps to these so a hand-edited storage with `waveAmp =
+ *  100000` can't push `waveLipFactor` so close to zero that sphereTrace
+ *  stalls on every plate fragment (visible as a black plate). */
+export const WAVE_AMP_MIN = 0;
+export const WAVE_AMP_MAX = 60;
+
+/** Plate wavelength bounds (px). The lower bound exists for the same Lipschitz
+ *  reason as WAVE_AMP_MAX — at very short wavelengths `waveFreq = 2π/λ`
+ *  explodes and `(amp·freq)²` swamps `waveLipFactor`. The upper bound matches
+ *  the UI slider so persistence and slider agree. */
+export const WAVE_WAVELENGTH_MIN = 60;
+export const WAVE_WAVELENGTH_MAX = 800;
+
+/** Rounded-edge radius bounds (px). Persistence clamps to keep
+ *  `cubeAnalyticExit`'s degenerate-normal fallback unreachable: it only
+ *  fires when `edgeR ≥ smallest halfSize`, which is filtered host-side at
+ *  every render frame — but a corrupt storage value of `edgeR = 1e6` would
+ *  also push `pill.halfSize + edgeR` extents into proxy-bounds territory
+ *  that fills the screen. The render-loop clamp `Math.min(params.edgeR,
+ *  pill.hx, ...)` saves us from that, but defensively clamping at the
+ *  persistence boundary too prevents a one-frame visual glitch. */
+export const EDGE_R_MIN = 0;
+export const EDGE_R_MAX = 100;
+
 export type Params = {
   sampleCount: 3 | 8 | 16 | 32 | 64;
   shape: 'pill' | 'prism' | 'cube' | 'plate';

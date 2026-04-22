@@ -123,16 +123,26 @@ beyond `pillCount` are zeros.
 - `waveAmp` / `waveFreq` drive the plate's midsurface displacement
   (`waveAmp · sin(waveFreq · x + 2·sceneTime) · sin(waveFreq · y +
   2·sceneTime)`). Ignored for other shapes.
-- `waveLipFactor = 1/√(1 + 2·(waveAmp·waveFreq)²)` is the precomputed
+- `waveLipFactor = 1/√(1 + (waveAmp·waveFreq)²)` is the precomputed
   Lipschitz safety factor `sdfWavyPlate` multiplies into its output, so
   sphere-trace steps stay inside the true distance without running
-  `inverseSqrt` on every SDF eval (≈ 0.86 at defaults vs the older hardcoded
-  0.6 — ~43 % more progress per step at the same safety margin).
+  `inverseSqrt` on every SDF eval. The bound is tight because the wave's
+  two partial derivatives never reach `amp·k` simultaneously — see the
+  derivation in `src/webgpu/uniforms.ts`. Defaults give ≈ 0.92 vs the
+  older hardcoded 0.6 — ~53 % more progress per step at the same safety
+  margin.
 - `historyBlend` is 0.2 in steady state and 1.0 for one frame after a scene
   change (preset click, photo reload, shape switch, pill shuffle, pause
   toggle) so stale temporal history doesn't ghost in. Switches to
-  progressive averaging `α = 1/n` while "Stop the world" is on, so paused
-  scenes converge to noise-free output as 1/√n.
+  progressive averaging `α = max(1/n, 1/256)` while "Stop the world" is
+  on — noise drops as 1/√n in the convergence ramp and bottoms out at a
+  256-sample sliding window (~6 % residual). The 1/256 floor is required
+  by the `rgba16float` history texture: a smaller α would push the new-
+  sample contribution below the fp16 quantum (≈ 0.0005 around mid-grey)
+  for high-contrast edge pixels, the contribution would round to 0, and
+  `(1 − α) · prev` decay would fade silhouettes to a black line over
+  several minutes of pause. See `main.ts pausedFrames` for the full
+  derivation.
 - `heroLambda` is a frame-jittered wavelength in [380, 700] — used by Approx
   mode for the one shared back-face trace.
 - `cameraZ` / `projection` drive ortho vs perspective (CPU derives `cameraZ`

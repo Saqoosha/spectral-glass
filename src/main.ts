@@ -73,7 +73,14 @@ async function main(): Promise<void> {
   let pills: Pill[] = stored?.pills && stored.pills.length > 0
     ? stored.pills.map((p) => ({ ...p }))
     : defaultPills(initSize.width, initSize.height);
-  let detach = attachDrag(ctx.canvas, pills, ctx.dpr, () => SHAPE_ID[params.shape]);
+  let detach = attachDrag(
+    ctx.canvas, pills, ctx.dpr,
+    () => SHAPE_ID[params.shape],
+    // Plate's visible silhouette extends past halfSize by `waveAmp` in the
+    // tumbling Z direction; report that to the drag layer so the hit circle
+    // matches the rendered shape (cube/pill/prism don't bulge → 0 margin).
+    () => params.shape === 'plate' ? params.waveAmp : 0,
+  );
 
   const saveDebounced = debouncedSaver(250);
   const persist = () => saveDebounced.schedule(params, pills);
@@ -146,7 +153,14 @@ async function main(): Promise<void> {
         cx: Math.random() * cur.width,
         cy: Math.random() * cur.height,
       }));
-      detach = attachDrag(ctx.canvas, pills, ctx.dpr, () => SHAPE_ID[params.shape]);
+      detach = attachDrag(
+    ctx.canvas, pills, ctx.dpr,
+    () => SHAPE_ID[params.shape],
+    // Plate's visible silhouette extends past halfSize by `waveAmp` in the
+    // tumbling Z direction; report that to the drag layer so the hit circle
+    // matches the rendered shape (cube/pill/prism don't bulge → 0 margin).
+    () => params.shape === 'plate' ? params.waveAmp : 0,
+  );
       markSceneChanged();
       persist();
     }
@@ -194,9 +208,11 @@ async function main(): Promise<void> {
   //
   // Resets to 1 whenever motion resumes or `markSceneChanged()` fires the
   // 2-frame history-overwrite reset (photo reload, shape switch, preset,
-  // pause toggle). Starts at 1 so the first post-reset paused frame uses
-  // α = 1/(pausedFrames+1) = 0.5 — correct weight for "average the new
-  // sample with the single-sample history the reset left behind".
+  // pause toggle). On the first paused frame after a reset, the increment
+  // step below bumps `pausedFrames` to 2 first, so α = 1/2 — the correct
+  // weight for "average the fresh sample with the single-sample history the
+  // reset left behind" (post-reset history holds exactly one sample because
+  // `historyBlend = 1.0` overwrote it).
   let pausedFrames = 1;
 
   // GPU timestamp queries — always on when the adapter supports them so the
