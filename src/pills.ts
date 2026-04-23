@@ -1,15 +1,46 @@
+/** Must match `MAX_PILLS` in `webgpu/uniforms.ts` (UBO array size). */
+const PILL_COUNT_CAP = 8;
+
 export type Pill = {
   cx: number; cy: number; cz: number;
   hx: number; hy: number; hz: number;
   edgeR: number;
 };
 
+/** Default multi-instance count — scene presets and the opening layout assume four. */
+export const DEFAULT_PILL_COUNT = 4;
+
+/**
+ * Old localStorage could persist a single drag target; the renderer always
+ * supported up to `MAX_PILLS` instances. Pad with `defaultPills` layout slots
+ * so we never start with a lone object unless the user explicitly deletes
+ * instances (we don't expose delete — min is four for the demo).
+ */
+export function ensurePillInstanceCount(
+  pills: readonly Pill[],
+  width: number,
+  height: number,
+  minCount: number = DEFAULT_PILL_COUNT,
+): Pill[] {
+  const copy = pills.length > PILL_COUNT_CAP
+    ? pills.slice(0, PILL_COUNT_CAP).map((p) => ({ ...p }))
+    : pills.map((p) => ({ ...p }));
+  if (copy.length >= minCount) {
+    return copy;
+  }
+  const defaults = defaultPills(width, height);
+  for (let i = copy.length; i < minCount && i < defaults.length; i++) {
+    copy.push({ ...defaults[i]! });
+  }
+  return copy;
+}
+
 export function defaultPills(width: number, height: number): Pill[] {
   // Hand-tuned asymmetric layout for the four-cube opening scene (see
   // `defaultParams` in ui.ts). Expressed as fractions of the viewport so the
   // composition scales from a phone-width window up to a 4K monitor.
   // `hx/hy/hz`/`edgeR` here are just placeholders — the render loop overwrites
-  // them from `params.pillLen/Short/Thick` every frame.
+  // them from `frameFieldsFromParams(params)` pill dimensions every frame.
   const layout: ReadonlyArray<readonly [number, number]> = [
     [0.22, 0.31],
     [0.49, 0.43],
@@ -40,7 +71,8 @@ export type ShapeIdFn = () => number;
  * Extra hit-radius margin for shapes whose visible silhouette extends beyond
  * `halfSize` (currently just plate, where the wavy surface bulges out by
  * `waveAmp` px in the Z direction that rotates into view). Returning 0 keeps
- * the existing tight bound for cube. main.ts wires this to `params.waveAmp`
+ * the existing tight bound for cube. main.ts wires this to the active shape's
+ * plate wave amp when `shape === 'plate'`.
  * so the drag region tracks the slider live.
  */
 export type WaveMarginFn = () => number;

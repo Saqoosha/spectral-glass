@@ -1,15 +1,14 @@
 import {
-  DIAMOND_SIZE_MAX, DIAMOND_SIZE_MIN,
-  DIAMOND_TIR_BOUNCES_MAX, DIAMOND_TIR_BOUNCES_MIN,
-  EDGE_R_MAX, EDGE_R_MIN, FOV_MAX, FOV_MIN,
+  FOV_MAX, FOV_MIN,
   ENVMAP_EXPOSURE_MAX, ENVMAP_EXPOSURE_MIN,
   ENVMAP_ROTATION_MAX, ENVMAP_ROTATION_MIN,
   HISTORY_ALPHA_MAX, HISTORY_ALPHA_MIN,
-  PILL_LEN_MAX, PILL_LEN_MIN, PILL_SHORT_MAX, PILL_SHORT_MIN,
-  PILL_THICK_MAX, PILL_THICK_MIN,
-  WAVE_AMP_MAX, WAVE_AMP_MIN, WAVE_WAVELENGTH_MAX, WAVE_WAVELENGTH_MIN,
+  N_D_MAX, N_D_MIN,
+  V_D_MAX, V_D_MIN,
+  REFRACTION_STRENGTH_MAX, REFRACTION_STRENGTH_MIN,
   type AaMode, type DiamondView, type Params,
 } from './ui';
+import { loadShapesFromStorage } from './shapeParams';
 import { DIAMOND_VIEW_VALUES } from './math/diamond';
 import { isKnownSlug, ENVMAP_SIZES, type EnvmapSize } from './envmapList';
 import type { Pill } from './pills';
@@ -53,6 +52,32 @@ function isFiniteNumber(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v);
 }
 
+const SHAPE_MATERIAL_KEYS = ['pill', 'prism', 'cube', 'plate', 'diamond'] as const;
+
+/**
+ * Pre–shared-material `shapes.*` stored n_d / V_d / refraction on each
+ * sub-object. If the root payload has no new keys, read the first
+ * per-shape value we find so old saves keep their numbers after upgrade.
+ */
+function materialFallbackFromNestedShapes(
+  shapes: unknown,
+): Partial<Pick<Params, 'n_d' | 'V_d' | 'refractionStrength'>> {
+  if (shapes === null || typeof shapes !== 'object' || Array.isArray(shapes)) return {};
+  const s = shapes as Record<string, unknown>;
+  const out: Partial<Pick<Params, 'n_d' | 'V_d' | 'refractionStrength'>> = {};
+  for (const k of SHAPE_MATERIAL_KEYS) {
+    const o = s[k];
+    if (o === null || typeof o !== 'object') continue;
+    const r = o as Record<string, unknown>;
+    if (out.n_d === undefined && isFiniteNumber(r.n_d)) out.n_d = r.n_d;
+    if (out.V_d === undefined && isFiniteNumber(r.V_d)) out.V_d = r.V_d;
+    if (out.refractionStrength === undefined && isFiniteNumber(r.refractionStrength)) {
+      out.refractionStrength = r.refractionStrength;
+    }
+  }
+  return out;
+}
+
 function validateParams(u: unknown): Partial<Params> {
   if (u === null || typeof u !== 'object') return {};
   const p   = u as Record<string, unknown>;
@@ -62,17 +87,23 @@ function validateParams(u: unknown): Partial<Params> {
   if (typeof p.projection     === 'string' && PROJECTIONS.has(p.projection as Params['projection']))   out.projection     = p.projection as Params['projection'];
   if (isFiniteNumber(p.fov))                out.fov                = Math.min(Math.max(p.fov, FOV_MIN), FOV_MAX);
   if (isFiniteNumber(p.sampleCount) && SAMPLE_COUNTS.has(p.sampleCount as Params['sampleCount']))      out.sampleCount    = p.sampleCount as Params['sampleCount'];
-  if (isFiniteNumber(p.n_d))                out.n_d                = p.n_d;
-  if (isFiniteNumber(p.V_d))                out.V_d                = p.V_d;
-  // Pill / cube / plate dimension clamps. Negative or absurd values would
-  // either invert the SDF (`abs(p) - h` always positive → shape vanishes)
-  // or push proxy bounds to fill the screen. Slider ranges in ui.ts are the
-  // source of truth.
-  if (isFiniteNumber(p.pillLen))            out.pillLen            = clamp(p.pillLen,   PILL_LEN_MIN,   PILL_LEN_MAX);
-  if (isFiniteNumber(p.pillShort))          out.pillShort          = clamp(p.pillShort, PILL_SHORT_MIN, PILL_SHORT_MAX);
-  if (isFiniteNumber(p.pillThick))          out.pillThick          = clamp(p.pillThick, PILL_THICK_MIN, PILL_THICK_MAX);
-  if (isFiniteNumber(p.edgeR))              out.edgeR              = clamp(p.edgeR, EDGE_R_MIN, EDGE_R_MAX);
-  if (isFiniteNumber(p.refractionStrength)) out.refractionStrength = p.refractionStrength;
+  out.shapes = loadShapesFromStorage(p.shapes, p);
+  const matFb = materialFallbackFromNestedShapes(p.shapes);
+  if (isFiniteNumber(p.n_d)) {
+    out.n_d = clamp(p.n_d, N_D_MIN, N_D_MAX);
+  } else if (isFiniteNumber(matFb.n_d)) {
+    out.n_d = clamp(matFb.n_d, N_D_MIN, N_D_MAX);
+  }
+  if (isFiniteNumber(p.V_d)) {
+    out.V_d = clamp(p.V_d, V_D_MIN, V_D_MAX);
+  } else if (isFiniteNumber(matFb.V_d)) {
+    out.V_d = clamp(matFb.V_d, V_D_MIN, V_D_MAX);
+  }
+  if (isFiniteNumber(p.refractionStrength)) {
+    out.refractionStrength = clamp(p.refractionStrength, REFRACTION_STRENGTH_MIN, REFRACTION_STRENGTH_MAX);
+  } else if (isFiniteNumber(matFb.refractionStrength)) {
+    out.refractionStrength = clamp(matFb.refractionStrength, REFRACTION_STRENGTH_MIN, REFRACTION_STRENGTH_MAX);
+  }
   if (typeof p.temporalJitter === 'boolean') out.temporalJitter    = p.temporalJitter;
   if (typeof p.debugProxy === 'boolean')     out.debugProxy        = p.debugProxy;
   if (typeof p.aaMode === 'string' && AA_MODES.has(p.aaMode as AaMode)) out.aaMode = p.aaMode as AaMode;
@@ -83,31 +114,6 @@ function validateParams(u: unknown): Partial<Params> {
   else if (typeof p.taa === 'boolean')                                 out.aaMode = p.taa ? 'taa' : 'none';
   if (typeof p.paused === 'boolean')         out.paused            = p.paused;
   if (isFiniteNumber(p.historyAlpha))        out.historyAlpha      = clamp(p.historyAlpha, HISTORY_ALPHA_MIN, HISTORY_ALPHA_MAX);
-  // Plate wave controls. Clamp to UI slider bounds so hand-edited storage
-  // can't push `(amp·freq)²` arbitrarily large — at the slider extremes
-  // (amp=60, wavelength=60) waveLipFactor still bottoms out at ≈ 0.16
-  // which `MIN_STEP = 0.5` in sphereTrace handles fine; without these
-  // clamps a value like `waveAmp = 1e6` would cut waveLipFactor to ~1e-7
-  // and stall the trace per fragment (visible black plate). The slider
-  // ranges in ui.ts are the source of truth; persistence mirrors them.
-  if (isFiniteNumber(p.waveAmp))         out.waveAmp        = clamp(p.waveAmp, WAVE_AMP_MIN, WAVE_AMP_MAX);
-  if (isFiniteNumber(p.waveWavelength))  out.waveWavelength = clamp(p.waveWavelength, WAVE_WAVELENGTH_MIN, WAVE_WAVELENGTH_MAX);
-  // Diamond size (girdle diameter in px). Same reason for clamping as the
-  // pill/plate dimensions above: a hand-edited negative/zero value would
-  // invert the polytope SDF into a degenerate shape, and a huge value would
-  // blow the proxy AABB past the viewport.
-  if (isFiniteNumber(p.diamondSize))     out.diamondSize    = clamp(p.diamondSize, DIAMOND_SIZE_MIN, DIAMOND_SIZE_MAX);
-  if (typeof p.diamondWireframe === 'boolean')  out.diamondWireframe  = p.diamondWireframe;
-  if (typeof p.diamondFacetColor === 'boolean') out.diamondFacetColor = p.diamondFacetColor;
-  if (typeof p.diamondTirDebug === 'boolean')   out.diamondTirDebug   = p.diamondTirDebug;
-  if (isFiniteNumber(p.diamondTirMaxBounces)) {
-    out.diamondTirMaxBounces = Math.round(
-      clamp(p.diamondTirMaxBounces, DIAMOND_TIR_BOUNCES_MIN, DIAMOND_TIR_BOUNCES_MAX),
-    );
-  }
-  if (typeof p.diamondView === 'string' && DIAMOND_VIEWS.has(p.diamondView as DiamondView)) {
-    out.diamondView = p.diamondView as DiamondView;
-  }
   // Envmap (Phase C). Slug is validated against the known Poly Haven
   // allow-list so a hand-edited / stale entry doesn't trigger a 404
   // on next startup.

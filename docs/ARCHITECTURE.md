@@ -48,7 +48,7 @@ no per-frame bind group allocation.
 
 `vs_proxy` emits a per-shape proxy mesh — pill/prism/cube/plate use a
 `CUBE_PROXY_VERT_COUNT`-vertex unit cube (36 verts, 12 tris, CCW-outward
-winding) scaled to `halfSize + edgeR`; diamond uses a
+winding) scaled to `halfSize` (SDF already accounts for `edgeR`); diamond uses a
 `DIAMOND_PROXY_VERT_COUNT`-vertex exact convex hull (138 verts, 46 tris)
 synthesized from Tolkowsky constants in `diamondProxyVertex` (see
 `src/shaders/diamond.wgsl`). The draw call issues
@@ -85,7 +85,7 @@ fragment shader's rays will trace.
 | `src/webgpu/mipmap.ts` | Fullscreen-triangle blit used by `photo.ts` to generate a mipmap chain after upload. Per-device pipeline + sampler cache (`WeakMap<GPUDevice,…>`). `pushErrorScope` catches invalid pipelines so a bad format isn't silently cached. |
 | `src/webgpu/uniforms.ts` | `FrameParams` type + buffer writer. Module-scope `Float32Array` scratch. |
 | `src/webgpu/history.ts` | Ping-pong `rgba16float` texture pair. Recreated on resize. |
-| `src/webgpu/perf.ts` | Optional GPU timestamp-query harness (ping-ponged readback). Enabled via `?perf=1`, surfaces timings on `window._perf`. Currently instruments the scene pass only; the FXAA post pass isn't in the HUD. |
+| `src/webgpu/perf.ts` | GPU timestamp-query harness (ping-ponged readback) when the adapter supports it — Tweakpane **GPU ms** by default. `?perf` on the URL adds `window._perf` sample logging. Scene pass only; FXAA post pass isn't in the HUD. |
 | `src/photo.ts` | Picsum fetch → `ImageBitmap` → GPU texture with mipmaps. Gradient fallback on fetch/decode failure (GPU-upload errors are let through to `uncapturederror` instead). `destroyPhoto` for the queue-drained cleanup path in `main.ts`. |
 | `src/pills.ts` | Pill state (mutated by drag) + pointer-event lifecycle with a discriminated-union drag state. |
 | `src/ui.ts` | Tweakpane bindings for `Params`. |
@@ -93,8 +93,8 @@ fragment shader's rays will trace.
 | `src/math/{cauchy,wyman,srgb,sdfPill,sdfPrism,sdfCube,camera,cube,plate,diamond,diamondExit}.ts` | Pure functions mirrored by the WGSL of the same name. The vitest suite is the reference. `cube.ts` / `plate.ts` / `diamond.ts` precompute the tumble rotations (rz·rx for cube, rx·ry for plate, Rx·Ry for diamond) on the host so the shader avoids per-SDF-eval cos/sin. `diamond.ts` also generates a WGSL `const` block containing its Tolkowsky-derived facet plane coefficients AND the unfolded normal arrays the analytical exit iterates over — single source of truth. `diamondExit.ts` mirrors the ray-polytope analytical exit so its behaviour can be pinned by a vitest regression without GPU access. |
 | `src/hdr.ts` | Radiance .hdr (RGBE) decoder + round-trip encoder. Pure JS, no GPU dependency — tested via synthetic encode→decode round-trips. Supports the adaptive-RLE format Poly Haven ships (width 8-32767); legacy per-pixel RLE throws with a clear message. |
 | `src/envmap.ts`, `src/envmapList.ts` | HDR environment panorama loader. `envmap.ts` fetches from a URL, decodes via `hdr.ts`, converts RGB float → RGBA half-float (with an `F16_MAX_FINITE = 65504` clamp to stop bright HDR pixels from overflowing into +Inf and seeding NaN through the linear sampler), uploads to an rgba16f texture for linear-filtered IBL sampling. `envmapList.ts` curates Poly Haven CC0 HDRIs across studio / indoor / outdoor / sunset / night categories at 1K / 2K / 4K resolution and exposes a `pickRandomSlug` helper for the UI Random button. |
-| `src/shaders/dispersion.wgsl` | Trace/SDF framework: sphere-trace, sceneSdf dispatch, Cauchy, CIE, Fresnel, spectral accumulation, TIR fallback (diamond: configurable 1…32 internal bounces in exact mode, `diamondTirMaxBounces` uniform), `cubeAnalyticExit` + `plateAnalyticExit` + `backExit` dispatcher, proxy vertex + fragment shaders. Writes linear RGB to `@location(0)` — sRGB encoding now lives in postprocess.wgsl. |
-| `src/shaders/diamond.wgsl` | Diamond-specific geometry: sdfDiamond, `diamondAnalyticExit` (ray-polytope back-exit for the first exit and each TIR-bounce step), miss sentinel + inward-nudge to avoid bad `pWorld` on miss, hitDiamondPillIdx (TAA reprojection pivot picker), diamondProxyVertex (exact convex-hull proxy mesh). Concatenated after dispersion.wgsl at pipeline build time. |
+| `src/shaders/dispersion/*.wgsl` | Split shader bundle (see `pipeline.ts` concat order): `frame` (uniforms + envmap sample), `sdf_primitives`, `scene` (sceneSdf aggregate), `trace` (sphere trace + analytic exits), `spectral`, `proxy` (`vs_proxy`), `fragment` (`fs_bg` / `fs_main`). Still one GPU module and one `fs_main` entry — physical split is for maintainability. |
+| `src/shaders/diamond.wgsl` | Diamond-specific geometry: sdfDiamond, `diamondAnalyticExit`, hitDiamondPillIdx, diamondProxyVertex, facet debug helpers. Concatenated between `sdf_primitives` and `scene` so `sceneSdf` can call `sdfDiamond`. |
 | `src/shaders/postprocess.wgsl` | Passthrough + FXAA fragment shaders. FXAA runs in perceptual (sRGB) luma for edge detection and blends color in linear space. Applies the sRGB OETF when the swapchain is non-sRGB. |
 | `src/persistence.ts` | localStorage read/write with schema versioning, field validation, legacy `taa: boolean` → `aaMode` migration, and a trailing-edge debounced saver (+ `flush()` for pagehide). |
 

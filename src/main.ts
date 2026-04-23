@@ -5,13 +5,14 @@ import { createPerf } from './webgpu/perf';
 import { loadPhoto, destroyPhoto } from './photo';
 import { loadEnvmap, createDefaultEnvmap, destroyEnvmap, type EnvmapTex } from './envmap';
 import { DEFAULT_ENVMAP_SLUG, envmapUrl, isKnownSlug, pickRandomSlug } from './envmapList';
-import { attachDrag, defaultPills, type Pill } from './pills';
+import { attachDrag, defaultPills, ensurePillInstanceCount, type Pill } from './pills';
 import { defaultParams, initUi, mergeParams, type Params } from './ui';
 import { cameraZForFov } from './math/camera';
 import { createHistory, resizeHistory } from './webgpu/history';
 import { createPostProcess, encodePost, resizeIntermediate, writePostFrame } from './webgpu/postprocess';
 import { loadStored, debouncedSaver } from './persistence';
 import { createPerfStats, makeFrameTimer } from './perfStats';
+import { frameFieldsFromParams } from './shapeParams';
 
 function showFatal(message: string): void {
   const fb = document.getElementById('fallback');
@@ -83,6 +84,8 @@ async function main(): Promise<void> {
   let pills: Pill[] = stored?.pills && stored.pills.length > 0
     ? stored.pills.map((p) => ({ ...p }))
     : defaultPills(initSize.width, initSize.height);
+  const pillCountBeforeEnsure = pills.length;
+  pills = ensurePillInstanceCount(pills, initSize.width, initSize.height);
   // Re-attach the pointer-event drag layer with the same shape/wave callbacks.
   // Hoisted into a helper because the loop body re-creates `pills` on Space
   // (random-shuffle), so we need the same arg list at two call sites.
@@ -92,12 +95,15 @@ async function main(): Promise<void> {
   const makeDrag = (): (() => void) => attachDrag(
     ctx.canvas, pills, ctx.dpr,
     () => SHAPE_ID[params.shape],
-    () => params.shape === 'plate' ? params.waveAmp : 0,
+    () => params.shape === 'plate' ? params.shapes.plate.waveAmp : 0,
   );
   let detach = makeDrag();
 
   const saveDebounced = debouncedSaver(250);
   const persist = () => saveDebounced.schedule(params, pills);
+  if (pills.length > pillCountBeforeEnsure) {
+    saveDebounced.schedule(params, pills);
+  }
 
   // Scene-change flag — consumed next frame by the render loop to force a
   // full historyBlend (1.0) so the previous scene doesn't ghost in. 2 frames
@@ -279,8 +285,8 @@ async function main(): Promise<void> {
     // clearing the history).
     if (params.shape === 'diamond' && (k === 't' || k === 's' || k === 'b' || k === 'f')) {
       const nextView = k === 't' ? 'top' : k === 's' ? 'side' : k === 'b' ? 'bottom' : 'free';
-      if (params.diamondView !== nextView) {
-        params.diamondView = nextView;
+      if (params.shapes.diamond.diamondView !== nextView) {
+        params.shapes.diamond.diamondView = nextView;
         pane.refresh();          // sync the dropdown so the UI reflects the hotkey
         markSceneChanged();      // rotation jumps discontinuously — clear ghost trail
         persist();
@@ -339,15 +345,12 @@ async function main(): Promise<void> {
   // `historyBlend = 1.0` overwrote it).
   let pausedFrames = 1;
 
-  // GPU timestamp queries — always on when the adapter supports them so the
-  // perf monitor in the UI has live data without a URL flag. `?perf=1` still
-  // exposes `window._perf` for external benchmark scripts that want raw
-  // sample arrays.
-  const perf        = ctx.hasTimestamp ? createPerf(ctx.device) : null;
-  const perfHud     = ctx.hasTimestamp && new URLSearchParams(location.search).has('perf');
+  // GPU timestamps when the device exposes `timestamp-query` (most desktop GPUs).
+  // `?perf` on the URL still turns on `window._perf` sample logging for benchmarks.
+  const perf    = ctx.hasTimestamp ? createPerf(ctx.device) : null;
+  const perfHud = perf !== null && new URLSearchParams(location.search).has('perf');
   const perfWindow: { samples: number[]; lastMs: number } = { samples: [], lastMs: 0 };
   (window as unknown as { _perf?: typeof perfWindow })._perf = perfHud ? perfWindow : undefined;
-
   const loop = () => {
     try {
       tickFrameTimer();
@@ -359,8 +362,10 @@ async function main(): Promise<void> {
       }
       resizeIntermediate(ctx.device, post, width, height);
 
+      const uf = frameFieldsFromParams(params);
+
       // Plate forces a square XY face (hy ≡ hx) so pillShort is effectively
-      // unused. Plate's wave amplitude is driven by `params.waveAmp` →
+      // unused. Plate's wave lives under `shapes.plate` →
       // `frame.waveAmp` (separate uniform). `pill.edgeR` is now the rounded-
       // corner radius for the rim that smooths the wavy front Z face into
       // the flat side X / Y faces — same role as in cube/pill/prism, so the
@@ -384,16 +389,16 @@ async function main(): Promise<void> {
           // overestimate of the true half-height (~0.305·d); harmless for
           // the hit circle because the max() picks the girdle radius from
           // hx/hy regardless. edgeR is unused for diamond (sharp facets).
-          const half = params.diamondSize / 2;
+          const half = uf.diamondSize / 2;
           pill.hx    = half;
           pill.hy    = half;
           pill.hz    = half;
           pill.edgeR = 0;
         } else {
-          pill.hx    = params.pillLen   / 2;
-          pill.hy    = isPlate ? pill.hx : params.pillShort / 2;
-          pill.hz    = params.pillThick / 2;
-          pill.edgeR = Math.min(params.edgeR, pill.hx, pill.hy, pill.hz);
+          pill.hx    = uf.pillLen   / 2;
+          pill.hy    = isPlate ? pill.hx : uf.pillShort / 2;
+          pill.hz    = uf.pillThick / 2;
+          pill.edgeR = Math.min(uf.edgeR, pill.hx, pill.hy, pill.hz);
         }
       }
       // Paused-frame accounting for progressive averaging (see declaration
@@ -451,10 +456,10 @@ async function main(): Promise<void> {
       writeFrame(ctx.device, frameBuf, {
         resolution:         [width, height],
         photoSize:          [photoNow.width, photoNow.height],
-        n_d:                params.n_d,
-        V_d:                params.V_d,
+        n_d:                uf.n_d,
+        V_d:                uf.V_d,
         sampleCount:        N,
-        refractionStrength: params.refractionStrength,
+        refractionStrength: uf.refractionStrength,
         jitter:             params.temporalJitter ? Math.random() / N : 0,
         refractionMode:     params.refractionMode === 'exact' ? 0 : 1,
         applySrgbOetf,
@@ -474,17 +479,17 @@ async function main(): Promise<void> {
         // Plate wave params: amp is straight pixels, but the GPU wants an
         // angular frequency (rad/px) so it can feed sin() directly. UI thinks
         // in "wavelength in px" (more intuitive) → convert 2π/λ here.
-        waveAmp:            params.waveAmp,
-        waveFreq:           (2 * Math.PI) / Math.max(params.waveWavelength, 1),
+        waveAmp:            uf.waveAmp,
+        waveFreq:           (2 * Math.PI) / Math.max(uf.waveWavelength, 1),
         // Diamond: single global size (girdle diameter in px). Ignored when
         // the current shape isn't diamond, but the uniform slot is always
         // written so shape switching doesn't leave stale values.
-        diamondSize:        params.diamondSize,
-        diamondWireframe:   params.diamondWireframe,
-        diamondFacetColor:  params.diamondFacetColor,
-        diamondTirDebug:    params.diamondTirDebug,
-        diamondTirMaxBounces: params.diamondTirMaxBounces,
-        diamondView:        params.diamondView,
+        diamondSize:        uf.diamondSize,
+        diamondWireframe:   uf.diamondWireframe,
+        diamondFacetColor:  uf.diamondFacetColor,
+        diamondTirDebug:    uf.diamondTirDebug,
+        diamondTirMaxBounces: uf.diamondTirMaxBounces,
+        diamondView:        uf.diamondView,
         // Envmap controls forward to the shader as-is; slug itself is
         // not a uniform (the texture IS the envmap — slug lives in UI
         // state only).
@@ -517,13 +522,6 @@ async function main(): Promise<void> {
               if (perfWindow.samples.length > 240) perfWindow.samples.shift();
             }
           })
-          // Without an explicit catch, a rejection here (typically GPU
-          // device-lost mid-frame, buffer destroyed during a resize race,
-          // or an exotic browser WebGPU implementation error) would land
-          // in the global `unhandledrejection` channel — the perf graph
-          // silently freezes at the last successful sample with no
-          // explanation. NaN flatlines the readout instead, making the
-          // failure debuggable.
           .catch((err) => {
             console.warn('[perf] readMs failed (likely GPU device lost):', err);
             perfStats.gpuMs = NaN;

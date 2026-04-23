@@ -5,7 +5,7 @@ import { dirname, resolve } from 'node:path';
 
 // Minimal drift detector for the host ↔ WGSL Frame uniform layout.
 //
-// uniforms.ts and dispersion.wgsl declare the same struct twice. WebGPU won't
+// uniforms.ts and `dispersion/frame.wgsl` declare the same struct twice. WebGPU won't
 // catch a host/shader mismatch — it just reads garbled bytes. Even a strict
 // integration test would need a real GPU device. The compromise: pin the
 // expected Frame field list here. The host side (uniforms.ts) is designed to
@@ -16,12 +16,12 @@ import { dirname, resolve } from 'node:path';
 // here — that would still produce silent uniform corruption on the GPU.
 
 const here   = dirname(fileURLToPath(import.meta.url));
-const wgsl   = readFileSync(resolve(here, '../src/shaders/dispersion.wgsl'), 'utf8');
+const wgsl   = readFileSync(resolve(here, '../src/shaders/dispersion/frame.wgsl'), 'utf8');
 
 // Pull the body of the WGSL `struct Frame { ... }` block as a single string.
 const FRAME_BODY = (() => {
   const m = /struct\s+Frame\s*\{([\s\S]*?)\}/m.exec(wgsl);
-  if (!m) throw new Error('Could not locate `struct Frame {...}` in dispersion.wgsl');
+  if (!m) throw new Error('Could not locate `struct Frame {...}` in dispersion/frame.wgsl');
   return m[1] ?? '';
 })();
 

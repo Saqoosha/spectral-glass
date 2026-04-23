@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { loadStored, save } from '../src/persistence';
-import type { Params } from '../src/ui';
+import { defaultParams, mergeParams, type Params } from '../src/ui';
 
 // localStorage doesn't exist in Node's vitest env by default. We install a
 // minimal in-memory mock on globalThis before each test so
@@ -34,38 +34,28 @@ function writeRaw(mem: MemoryStorage, params: Record<string, unknown>): void {
 // the payload, so tests that poke at a single field don't need a complete
 // Params object.
 function defaultParamsForSave(): Params {
-  return {
+  const base = defaultParams();
+  return mergeParams(base, {
     sampleCount: 8,
     shape: 'diamond',
     n_d: 2.418,
     V_d: 55,
-    pillLen: 200,
-    pillShort: 200,
-    pillThick: 200,
-    edgeR: 10,
     refractionStrength: 0.2,
-    refractionMode: 'exact',
-    temporalJitter: true,
-    projection: 'perspective',
-    fov: 60,
-    debugProxy: false,
-    aaMode: 'taa',
-    paused: false,
-    historyAlpha: 0.2,
-    waveAmp: 20,
-    waveWavelength: 300,
-    diamondSize: 200,
-    diamondWireframe: false,
-    diamondFacetColor: false,
-    diamondTirDebug: false,
-    diamondTirMaxBounces: 6,
-    diamondView: 'free',
-    envmapEnabled: true,
-    envmapExposure: 0.25,
-    envmapRotation: 0,
+    shapes: {
+      ...base.shapes,
+      diamond: {
+        ...base.shapes.diamond,
+        diamondSize: 200,
+        diamondWireframe: false,
+        diamondFacetColor: false,
+        diamondTirDebug: false,
+        diamondTirMaxBounces: 6,
+        diamondView: 'free',
+      },
+    },
     envmapSlug: 'studio_small_03',
     envmapSize: '2k',
-  };
+  });
 }
 
 describe('persistence — diamondView allow-list validation', () => {
@@ -78,19 +68,16 @@ describe('persistence — diamondView allow-list validation', () => {
       const mem = installStorage();
       writeRaw(mem, { diamondView: view });
       const loaded = loadStored();
-      expect(loaded?.params.diamondView).toBe(view);
+      expect(loaded?.params.shapes?.diamond.diamondView).toBe(view);
     });
   }
 
-  it('rejects a non-canonical view string — silently drops to default path', () => {
+  it('rejects a non-canonical view string — legacy flat payload snaps diamond to default', () => {
     const mem = installStorage();
     writeRaw(mem, { diamondView: 'isometric' });
     const loaded = loadStored();
-    // Field should be absent from returned params so the caller's merge
-    // with defaultParams() re-seeds it to 'free'. Dropping-to-default is
-    // the documented failure mode for unknown enum strings — same as how
-    // `shape` / `aaMode` / `projection` behave.
-    expect(loaded?.params.diamondView).toBeUndefined();
+    // Unknown enum → shapesFromLegacyFlat keeps DEF_DIAMOND.diamondView ('free').
+    expect(loaded?.params.shapes?.diamond.diamondView).toBe('free');
   });
 
   it('rejects non-string types for diamondView', () => {
@@ -103,7 +90,7 @@ describe('persistence — diamondView allow-list validation', () => {
       mem.clear();
       writeRaw(mem, { diamondView: bogus as unknown });
       const loaded = loadStored();
-      expect(loaded?.params.diamondView).toBeUndefined();
+      expect(loaded?.params.shapes?.diamond.diamondView).toBe('free');
     }
   });
 
@@ -113,9 +100,17 @@ describe('persistence — diamondView allow-list validation', () => {
     installStorage();
     const params = defaultParamsForSave();
     for (const view of ['free', 'top', 'side', 'bottom'] as const) {
-      save({ ...params, diamondView: view }, []);
+      save(
+        mergeParams(params, {
+          shapes: {
+            ...params.shapes,
+            diamond: { ...params.shapes.diamond, diamondView: view },
+          },
+        }),
+        [],
+      );
       const loaded = loadStored();
-      expect(loaded?.params.diamondView).toBe(view);
+      expect(loaded?.params.shapes?.diamond.diamondView).toBe(view);
     }
   });
 });
@@ -130,7 +125,7 @@ describe('persistence — diamondFacetColor boolean guard', () => {
       const mem = installStorage();
       writeRaw(mem, { diamondFacetColor: val });
       const loaded = loadStored();
-      expect(loaded?.params.diamondFacetColor).toBe(val);
+      expect(loaded?.params.shapes?.diamond.diamondFacetColor).toBe(val);
     }
   });
 
@@ -145,7 +140,9 @@ describe('persistence — diamondFacetColor boolean guard', () => {
       const mem = installStorage();
       writeRaw(mem, { diamondFacetColor: bogus as unknown });
       const loaded = loadStored();
-      expect(loaded?.params.diamondFacetColor).toBeUndefined();
+      expect(loaded?.params.shapes?.diamond.diamondFacetColor).toBe(
+        defaultParams().shapes.diamond.diamondFacetColor,
+      );
     }
   });
 
@@ -153,9 +150,17 @@ describe('persistence — diamondFacetColor boolean guard', () => {
     installStorage();
     const params = defaultParamsForSave();
     for (const val of [true, false]) {
-      save({ ...params, diamondFacetColor: val }, []);
+      save(
+        mergeParams(params, {
+          shapes: {
+            ...params.shapes,
+            diamond: { ...params.shapes.diamond, diamondFacetColor: val },
+          },
+        }),
+        [],
+      );
       const loaded = loadStored();
-      expect(loaded?.params.diamondFacetColor).toBe(val);
+      expect(loaded?.params.shapes?.diamond.diamondFacetColor).toBe(val);
     }
   });
 });

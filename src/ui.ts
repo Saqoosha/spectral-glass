@@ -2,6 +2,8 @@ import { Pane } from 'tweakpane';
 import type { PerfStats } from './perfStats';
 import { DIAMOND_SIZE_MIN, DIAMOND_SIZE_MAX, type DiamondView } from './math/diamond';
 import { ENVMAPS, DEFAULT_ENVMAP_SLUG, DEFAULT_ENVMAP_SIZE, ENVMAP_SIZES, type EnvmapSize } from './envmapList';
+import { defaultShapesParams, type ShapesParams } from './shapeParams';
+export type { ShapesParams, CommonBodyParams, PlateShapeParams, DiamondShapeParams } from './shapeParams';
 
 /** Bounds for the envmap exposure slider. Exposed so `persistence.ts`
  *  clamps hand-edited / stale localStorage to the exact same range —
@@ -77,6 +79,14 @@ export const PILL_THICK_MAX = 200;
 export const HISTORY_ALPHA_MIN = 0.05;
 export const HISTORY_ALPHA_MAX = 1.0;
 
+/** Shared Cauchy / refraction — same range as the Spectral sliders + persistence. */
+export const N_D_MIN = 1.0;
+export const N_D_MAX = 3.5;
+export const V_D_MIN = 1;
+export const V_D_MAX = 90;
+export const REFRACTION_STRENGTH_MIN = 0;
+export const REFRACTION_STRENGTH_MAX = 1.0;
+
 /** Antialiasing strategy. `taa` drives in-scene sub-pixel jitter +
  *  motion-vector history reprojection (converges under motion but can
  *  add noise around rotating shapes). `fxaa` is a single-frame post
@@ -89,13 +99,13 @@ export type AaMode = 'none' | 'fxaa' | 'taa';
 export type Params = {
   sampleCount: 3 | 8 | 16 | 32 | 64;
   shape: 'pill' | 'prism' | 'cube' | 'plate' | 'diamond';
-  n_d: number;
-  V_d: number;
-  pillLen: number;
-  pillShort: number;
-  pillThick: number;
-  edgeR: number;
-  refractionStrength: number;
+  /** Cauchy IOR, Abbe number, and overall refraction strength — shared by every shape. */
+  n_d:                 number;
+  V_d:                 number;
+  refractionStrength:  number;
+  /** Per-type geometry, plate wave, and diamond controls. `shape` picks which block feeds
+   *  the render path; changing the dropdown does not overwrite other types' size sliders. */
+  shapes: ShapesParams;
   refractionMode: 'exact' | 'approx';
   temporalJitter: boolean;
   projection: 'ortho' | 'perspective';
@@ -104,41 +114,6 @@ export type Params = {
   aaMode: AaMode;
   paused: boolean;  // "Stop the world" — freeze rotation/wave while keeping AA converging
   historyAlpha: number;  // steady-state EMA blend weight (0..1). Lower = more motion blur, less noise; higher = sharper but noisier.
-  // Plate-only wave controls. Amp in pixels (midsurface z-displacement);
-  // wavelength in pixels (converted to angular frequency 2π/wavelength on
-  // the GPU side via the waveFreq uniform). Exposed as length so the UI
-  // label reads naturally; the conversion happens in main.ts.
-  waveAmp: number;
-  waveWavelength: number;
-  // Diamond-only size control. Girdle diameter in pixels. All diamond
-  // instances in the scene share this single value (per-instance sizing is
-  // Phase B territory); per-instance POSITIONS are still independent via the
-  // pills array's cx/cy.
-  diamondSize: number;
-  // Diamond-only debug overlay: when true, fs_main draws the cut's facet
-  // edges on top of the refracted rendering so the geometry can be
-  // cross-checked against a real brilliant cut reference. Uses the SDF's
-  // plane-difference trick (two planes equidistant = facet boundary).
-  diamondWireframe: boolean;
-  // Diamond-only debug overlay: when true, fs_main flat-shades each facet
-  // class with a distinct colour (table=red, bezel=green, star=blue,
-  // upper-half=yellow, girdle=cyan, lower-half=magenta, pavilion=orange)
-  // so per-facet adjacency + coverage are visible without refraction
-  // muddying the signal. Typically paired with refractionStrength=0.
-  diamondFacetColor: boolean;
-  // Diamond-only TIR-chain debug. Pixels that don't resolve: hot pink =
-  // bounce budget used up, refract out still TIR; orange = analytical exit
-  // miss (see dispersion.wgsl). Leave off for production.
-  diamondTirDebug: boolean;
-  // Diamond-only: max internal reflections in the TIR-bounce path (exact
-  // refraction). Higher = fewer hot-pink exhaust pixels, more per-pixel work.
-  diamondTirMaxBounces: number;
-  // Diamond-only rotation preset. 'free' tumbles with the spin animation;
-  // fixed views pin to a canonical pose for cross-checking facet geometry
-  // against a reference (top = table toward camera, side = girdle profile,
-  // bottom = culet toward camera). Also bound to the T/S/B/F hotkeys in
-  // main.ts so the user can snap between views without opening the panel.
-  diamondView: DiamondView;
   // HDR environment map controls (Phase C). Replace the Phase A
   // reflSrc hack (background-photo-at-UV-offset) with a proper
   // environment panorama so reflections sample a REAL sky/studio
@@ -162,6 +137,17 @@ export type Params = {
   // 4K ~ 25MB). See ENVMAP_SIZES in src/envmapList.ts.
   envmapSize: EnvmapSize;
 };
+
+// Object-style options are reordered by Tweakpane (string coerced values
+// sort as '16'<'3'<'32'…). Array-style { text, value }[] keeps declaration order
+// (see @tweakpane/core ListParamsOptions / ArrayStyleListOptions).
+const SAMPLE_COUNT_PANE_OPTIONS: { text: string; value: Params['sampleCount'] }[] = [
+  { text: '3 (fake RGB)', value: 3 },
+  { text: '8 (default)', value: 8 },
+  { text: '16', value: 16 },
+  { text: '32', value: 32 },
+  { text: '64 (max)', value: 64 },
+];
 
 type Preset = {
   label: string;
@@ -202,82 +188,77 @@ const PRESETS: readonly Preset[] = [
   {
     label: 'Subtle pill',
     apply: (p) => {
-      p.shape              = 'pill';
-      p.sampleCount        = 8;
-      p.n_d                = 1.5168;
-      p.V_d                = 40;
-      p.pillLen            = 320;
-      p.pillShort          = 88;
-      p.pillThick          = 40;
-      p.edgeR              = 14;
+      p.shape       = 'pill';
+      p.sampleCount = 8;
+      p.n_d   = 1.5168;
+      p.V_d   = 40;
       p.refractionStrength = 0.1;
-      p.refractionMode     = 'exact';
+      p.shapes.pill = {
+        ...p.shapes.pill,
+        pillLen: 320, pillShort: 88, pillThick: 40, edgeR: 14,
+      };
+      p.refractionMode = 'exact';
     },
   },
   {
     label: 'Strong dispersion',
     apply: (p) => {
-      p.shape              = 'pill';
-      p.sampleCount        = 16;
-      p.n_d                = 1.6;
-      p.V_d                = 18;
-      p.pillLen            = 320;
-      p.pillShort          = 88;
-      p.pillThick          = 40;
-      p.edgeR              = 14;
+      p.shape       = 'pill';
+      p.sampleCount = 16;
+      p.n_d   = 1.6;
+      p.V_d   = 18;
       p.refractionStrength = 0.35;
-      p.refractionMode     = 'exact';
+      p.shapes.pill = {
+        ...p.shapes.pill,
+        pillLen: 320, pillShort: 88, pillThick: 40, edgeR: 14,
+      };
+      p.refractionMode = 'exact';
     },
   },
   {
     label: 'Prism rainbow',
     apply: (p) => {
-      p.shape              = 'prism';
-      p.sampleCount        = 16;
-      p.n_d                = 1.6;
-      p.V_d                = 12;
-      p.pillLen            = 400;
-      p.pillShort          = 80;
-      p.pillThick          = 80;
-      p.edgeR              = 4;
+      p.shape        = 'prism';
+      p.sampleCount  = 16;
+      p.n_d   = 1.6;
+      p.V_d   = 12;
       p.refractionStrength = 0.18;
-      p.refractionMode     = 'exact';
+      p.shapes.prism = {
+        ...p.shapes.prism,
+        pillLen: 400, pillShort: 80, pillThick: 80, edgeR: 4,
+      };
+      p.refractionMode = 'exact';
     },
   },
   {
     label: 'Rotating cube',
     apply: (p) => {
-      p.shape              = 'cube';
-      p.sampleCount        = 16;
-      p.n_d                = 1.55;
-      p.V_d                = 18;
-      p.pillLen            = 160;
-      p.pillShort          = 160;
-      p.pillThick          = 160;
-      p.edgeR              = 10;
+      p.shape       = 'cube';
+      p.sampleCount = 16;
+      p.n_d   = 1.55;
+      p.V_d   = 18;
       p.refractionStrength = 0.2;
-      p.refractionMode     = 'exact';
+      p.shapes.cube = {
+        ...p.shapes.cube,
+        pillLen: 160, pillShort: 160, pillThick: 160, edgeR: 10,
+      };
+      p.refractionMode = 'exact';
     },
   },
   {
     label: 'Wavy plate',
     apply: (p) => {
-      // Thick square plate, tumbling. Constant-thickness bent sheet means the
-      // chromatic effect tracks the bend in the midsurface, so pairing with
-      // extreme-dispersion "Rainbow soap" paints the ripple pattern with
-      // rainbow everywhere on the photo behind.
-      p.shape              = 'plate';
-      p.sampleCount        = 16;
-      p.n_d                = 1.272;
-      p.V_d                = 2.0;
-      p.pillLen            = 400;  // square face
-      p.pillShort          = 400;  // unused (forced = pillLen in main.ts)
-      p.pillThick          = 100;  // thick slab — thin plates lose chroma
-      p.edgeR              = 4;    // tiny rounded rim — smooths the front-Z / side-X|Y crease so plate edge speckles vanish at their source
-      p.waveAmp            = 20;
-      p.waveWavelength     = 300;
+      p.shape        = 'plate';
+      p.sampleCount  = 16;
+      p.n_d   = 1.272;
+      p.V_d   = 2.0;
       p.refractionStrength = 0.2;
-      p.refractionMode     = 'exact';
+      p.shapes.plate = {
+        ...p.shapes.plate,
+        pillLen: 400, pillThick: 100, edgeR: 4, pillShort: 400,
+        waveAmp: 20, waveWavelength: 300,
+      };
+      p.refractionMode = 'exact';
     },
   },
 ];
@@ -306,11 +287,10 @@ export function initUi(
   const pane = new Pane({ title: 'Spectral Dispersion', expanded: true });
 
   const spectral = pane.addFolder({ title: 'Spectral' });
-  spectral.addBinding(params, 'sampleCount', {
-    options: { '3 (fake RGB)': 3, '8 (default)': 8, '16': 16, '32': 32, '64 (max)': 64 },
-  });
+  spectral.addBinding(params, 'sampleCount', { options: SAMPLE_COUNT_PANE_OPTIONS });
   spectral.addBinding(params, 'n_d', { min: 1.0, max: 3.5, step: 0.001, label: 'IOR n_d' });
-  spectral.addBinding(params, 'V_d', { min: 1,   max: 90,  step: 0.5,   label: 'Abbe V_d' });
+  spectral.addBinding(params, 'V_d', { min: 1, max: 90, step: 0.5, label: 'Abbe V_d' });
+  spectral.addBinding(params, 'refractionStrength', { min: 0, max: 1.0, step: 0.001, label: 'Refraction' });
   spectral.addBinding(params, 'refractionMode', {
     // Approx: one back-face trace shared across all wavelengths (jittered each
     // frame). On this engine it's texture-bandwidth bound, so the speedup vs
@@ -329,65 +309,48 @@ export function initUi(
       'Diamond (brilliant)': 'diamond',
     },
   });
-  // Pill / prism keep the three independent X/Y/Z sliders (their geometries
-  // care about the asymmetry — a tall thin pill vs a wide slab look very
-  // different). Cube collapses them into a single "Size" slider since all
-  // three half-extents must stay equal for the rotation to be a true cube.
-  const lenBinding   = shape.addBinding(params, 'pillLen',   { min: PILL_LEN_MIN,   max: PILL_LEN_MAX,   step: 1, label: 'Length (X)' });
-  const shortBinding = shape.addBinding(params, 'pillShort', { min: PILL_SHORT_MIN, max: PILL_SHORT_MAX, step: 1, label: 'Short (Y)'  });
-  const thickBinding = shape.addBinding(params, 'pillThick', { min: PILL_THICK_MIN, max: PILL_THICK_MAX, step: 1, label: 'Thick (Z)'  });
-  // Cube size proxy — writes to all three pill dims so the existing per-pill
-  // halfSize.xyz pipeline doesn't need a separate code path.
-  const cubeSize = { value: params.pillLen };
-  const sizeBinding = shape.addBinding(cubeSize, 'value', { min: PILL_LEN_MIN, max: 600, step: 1, label: 'Size' });
+
+  // One inspector subfolder per object type — only the active shape’s folder
+  // is visible so each mode gets a dedicated control surface.
+  const inspPill = shape.addFolder({ title: 'Pill', expanded: true });
+  inspPill.addBinding(params.shapes.pill, 'pillLen',   { min: PILL_LEN_MIN,   max: PILL_LEN_MAX,   step: 1, label: 'Length (X)' });
+  inspPill.addBinding(params.shapes.pill, 'pillShort', { min: PILL_SHORT_MIN, max: PILL_SHORT_MAX, step: 1, label: 'Short (Y)'  });
+  inspPill.addBinding(params.shapes.pill, 'pillThick', { min: PILL_THICK_MIN, max: PILL_THICK_MAX, step: 1, label: 'Thick (Z)'  });
+  inspPill.addBinding(params.shapes.pill, 'edgeR',     { min: EDGE_R_MIN, max: EDGE_R_MAX, step: 0.5, label: 'Edge radius' });
+
+  const inspPrism = shape.addFolder({ title: 'Prism (rainbow)', expanded: true });
+  inspPrism.addBinding(params.shapes.prism, 'pillLen',   { min: PILL_LEN_MIN,   max: PILL_LEN_MAX,   step: 1, label: 'Length (X)' });
+  inspPrism.addBinding(params.shapes.prism, 'pillShort', { min: PILL_SHORT_MIN, max: PILL_SHORT_MAX, step: 1, label: 'Short (Y)'  });
+  inspPrism.addBinding(params.shapes.prism, 'pillThick', { min: PILL_THICK_MIN, max: PILL_THICK_MAX, step: 1, label: 'Thick (Z)'  });
+  inspPrism.addBinding(params.shapes.prism, 'edgeR',     { min: EDGE_R_MIN, max: EDGE_R_MAX, step: 0.5, label: 'Edge radius' });
+
+  const inspCube = shape.addFolder({ title: 'Cube (rotating)', expanded: true });
+  const cubeSize = { value: params.shapes.cube.pillLen };
+  const sizeBinding = inspCube.addBinding(cubeSize, 'value', { min: PILL_LEN_MIN, max: 600, step: 1, label: 'Size' });
   sizeBinding.on('change', () => {
     if (params.shape !== 'cube') return;
-    params.pillLen   = cubeSize.value;
-    params.pillShort = cubeSize.value;
-    params.pillThick = cubeSize.value;
+    params.shapes.cube.pillLen   = cubeSize.value;
+    params.shapes.cube.pillShort = cubeSize.value;
+    params.shapes.cube.pillThick = cubeSize.value;
   });
-  const edgeBinding = shape.addBinding(params, 'edgeR', { min: EDGE_R_MIN, max: EDGE_R_MAX, step: 0.5, label: 'Edge radius' });
-  // Plate-only wave controls. Both stay hidden for pill/prism/cube/diamond
-  // and animate in only when shape === 'plate' (syncShapeSliders below).
-  const waveAmpBinding = shape.addBinding(params, 'waveAmp', {
+  inspCube.addBinding(params.shapes.cube, 'edgeR', { min: EDGE_R_MIN, max: EDGE_R_MAX, step: 0.5, label: 'Edge radius' });
+
+  const inspPlate = shape.addFolder({ title: 'Plate (wavy)', expanded: true });
+  inspPlate.addBinding(params.shapes.plate, 'pillLen', { min: PILL_LEN_MIN, max: PILL_LEN_MAX, step: 1, label: 'Face (square)' });
+  inspPlate.addBinding(params.shapes.plate, 'pillThick', { min: PILL_THICK_MIN, max: PILL_THICK_MAX, step: 1, label: 'Thick (Z)' });
+  inspPlate.addBinding(params.shapes.plate, 'waveAmp', {
     min: WAVE_AMP_MIN, max: WAVE_AMP_MAX, step: 0.5, label: 'Wave amp',
   });
-  const waveLenBinding = shape.addBinding(params, 'waveWavelength', {
+  inspPlate.addBinding(params.shapes.plate, 'waveWavelength', {
     min: WAVE_WAVELENGTH_MIN, max: WAVE_WAVELENGTH_MAX, step: 1, label: 'Wavelength',
   });
-  // Diamond-only size control. Hidden for every other shape (fixed Tolkowsky
-  // proportions mean there's nothing else to tweak on the diamond — size is
-  // the single knob).
-  const diamondSizeBinding = shape.addBinding(params, 'diamondSize', {
-    min: DIAMOND_SIZE_MIN, max: DIAMOND_SIZE_MAX, step: 1, label: 'Size',
+  inspPlate.addBinding(params.shapes.plate, 'edgeR', { min: EDGE_R_MIN, max: EDGE_R_MAX, step: 0.5, label: 'Rim radius' });
+
+  const inspDiamond = shape.addFolder({ title: 'Diamond (brilliant)', expanded: true });
+  inspDiamond.addBinding(params.shapes.diamond, 'diamondSize', {
+    min: DIAMOND_SIZE_MIN, max: DIAMOND_SIZE_MAX, step: 1, label: 'Girdle size',
   });
-  // Diamond-only: facet-wireframe debug overlay. Useful for eyeballing
-  // whether the SDF's cut lines match a reference brilliant cut.
-  const diamondWireframeBinding = shape.addBinding(params, 'diamondWireframe', {
-    label: 'Wireframe',
-  });
-  // Diamond-only: flat-shade by facet class. Pair with Refraction = 0
-  // for a clean colour-coded view of each facet's coverage.
-  const diamondFacetColorBinding = shape.addBinding(params, 'diamondFacetColor', {
-    label: 'Facet color',
-  });
-  // Diamond-only: diagnostic tints (pink = still TIR after max bounces; orange =
-  // analytic exit miss). Leave OFF for production.
-  const diamondTirDebugBinding = shape.addBinding(params, 'diamondTirDebug', {
-    label: 'TIR debug',
-  });
-  // Higher values cost more (per-λ × bounces × analytic exit) on TIR pixels.
-  const diamondTirMaxBouncesBinding = shape.addBinding(params, 'diamondTirMaxBounces', {
-    min: DIAMOND_TIR_BOUNCES_MIN,
-    max: DIAMOND_TIR_BOUNCES_MAX,
-    step: 1,
-    label: 'TIR max bounces (costly ↑)',
-  });
-  // Diamond-only: canonical view presets. 'Free' keeps the tumble; the
-  // three fixed poses pin the shape so facet geometry can be compared
-  // against a reference illustration. T/S/B/F hotkeys bind to the same
-  // param in main.ts — hotkey or dropdown, whichever is faster for the user.
-  const diamondViewBinding = shape.addBinding(params, 'diamondView', {
+  inspDiamond.addBinding(params.shapes.diamond, 'diamondView', {
     label: 'View',
     options: {
       'Free (tumble)': 'free',
@@ -396,49 +359,37 @@ export function initUi(
       'Bottom (culet)': 'bottom',
     },
   });
+  inspDiamond.addBinding(params.shapes.diamond, 'diamondWireframe',  { label: 'Wireframe' });
+  inspDiamond.addBinding(params.shapes.diamond, 'diamondFacetColor', { label: 'Facet color' });
+  inspDiamond.addBinding(params.shapes.diamond, 'diamondTirDebug',   { label: 'TIR debug' });
+  inspDiamond.addBinding(params.shapes.diamond, 'diamondTirMaxBounces', {
+    min: DIAMOND_TIR_BOUNCES_MIN,
+    max: DIAMOND_TIR_BOUNCES_MAX,
+    step: 1,
+    label: 'TIR max bounces (costly ↑)',
+  });
 
-  // Show the right subset of sliders for each shape. Pill/prism use all three
-  // X/Y/Z; cube collapses into a single Size slider (halfSize must stay equal
-  // for the rotation to be a true cube); plate uses Length (square face,
-  // hy ≡ hx forced in main.ts) + Thick, so we hide the Short slider. Also
-  // keeps cubeSize in sync with pillLen so switching shape mid-session
-  // doesn't surprise the user.
   function syncShapeSliders(): void {
-    const isCube    = params.shape === 'cube';
-    const isPlate   = params.shape === 'plate';
-    const isDiamond = params.shape === 'diamond';
-    // Diamond ignores per-pill halfSize / edgeR entirely — it drives its
-    // geometry from `diamondSize` alone. Hiding the pill-dimension sliders
-    // when diamond is selected keeps the Shape folder tidy; they reappear
-    // with their prior values on shape switch (the params object isn't
-    // mutated by this hide/show cycle).
-    lenBinding.hidden        = isCube    || isDiamond;
-    shortBinding.hidden      = isCube    || isPlate    || isDiamond;
-    thickBinding.hidden      = isCube    || isDiamond;
-    sizeBinding.hidden       = !isCube;
-    edgeBinding.hidden       = isDiamond;  // plate uses edgeR as its rim radius; diamond wants sharp facets, no rounding
-    waveAmpBinding.hidden    = !isPlate;
-    waveLenBinding.hidden    = !isPlate;
-    diamondSizeBinding.hidden       = !isDiamond;
-    diamondWireframeBinding.hidden  = !isDiamond;
-    diamondFacetColorBinding.hidden = !isDiamond;
-    diamondTirDebugBinding.hidden         = !isDiamond;
-    diamondTirMaxBouncesBinding.hidden    = !isDiamond;
-    diamondViewBinding.hidden             = !isDiamond;
+    const s = params.shape;
+    inspPill.hidden    = s !== 'pill';
+    inspPrism.hidden = s !== 'prism';
+    inspCube.hidden  = s !== 'cube';
+    inspPlate.hidden = s !== 'plate';
+    inspDiamond.hidden = s !== 'diamond';
+
+    const isCube    = s === 'cube';
+    const isPlate   = s === 'plate';
     if (isCube) {
-      // Average the three dims to seed Size — covers the case where shape
-      // was just switched from pill/prism with non-equal extents.
-      const avg = Math.round((params.pillLen + params.pillShort + params.pillThick) / 3);
+      const c  = params.shapes.cube;
+      const avg = Math.round((c.pillLen + c.pillShort + c.pillThick) / 3);
       cubeSize.value   = avg;
-      params.pillLen   = avg;
-      params.pillShort = avg;
-      params.pillThick = avg;
+      c.pillLen   = avg;
+      c.pillShort = avg;
+      c.pillThick = avg;
     } else {
-      cubeSize.value = params.pillLen;
+      cubeSize.value = params.shapes.cube.pillLen;
       if (isPlate) {
-        // Mirror pillLen into pillShort so persistence / non-plate shapes
-        // inherit a sensible value if the user later switches back.
-        params.pillShort = params.pillLen;
+        params.shapes.plate.pillShort = params.shapes.plate.pillLen;
       }
     }
   }
@@ -487,7 +438,6 @@ export function initUi(
   });
 
   const misc = pane.addFolder({ title: 'Misc' });
-  misc.addBinding(params, 'refractionStrength', { min: 0, max: 1.0, step: 0.001, label: 'Refraction' });
   misc.addBinding(params, 'projection', {
     options: { Orthographic: 'ortho', Perspective: 'perspective' },
   });
@@ -528,8 +478,8 @@ export function initUi(
   const reload = presets.addButton({ title: 'Reload photo' });
   reload.on('click', reloadPhoto);
 
-  // Materials only change n_d + V_d — leaves shape/size/refraction strength
-  // alone so you can compare glass types on the same geometry.
+  // Materials only change n_d + V_d — refraction strength and per-shape
+  // sizes stay as-is.
   const materials = pane.addFolder({ title: 'Materials', expanded: false });
   for (const m of MATERIALS) {
     const btn = materials.addButton({ title: `${m.label}  (n=${m.n_d}, V=${m.V_d})` });
@@ -543,34 +493,63 @@ export function initUi(
   }
 
   // Live perf monitor — fed by the render loop via the `perf.stats` object.
-  // Tweakpane's monitor bindings poll the fields directly (interval ms below),
-  // so neither the loop nor the UI has to call `pane.refresh()`.
+  // Tweakpane's graph view hides the numeric value until hover; pair each
+  // metric with a text monitor (same underlying numbers via getters) so the
+  // readout is always visible. The graph row label is kept minimal (trend only).
   if (perf) {
-    const monitor = pane.addFolder({ title: 'Perf', expanded: true });
+    const stats  = perf.stats;
+    const live = {
+      get fps() { return stats.fps; },
+      get cpuMs() { return stats.cpuMs; },
+      get gpuMs() { return stats.gpuMs; },
+    };
+    const monitor  = pane.addFolder({ title: 'Perf', expanded: true });
+    const pollMs   = 250;
+    // Values first — always show numbers; `format` is supported by the number monitor plugin.
+    const fmtMs   = (v: number) => (Number.isFinite(v) ? v.toFixed(2) : '—');
+    const fmtGpu = (v: number) => (Number.isFinite(v) ? v.toFixed(3) : '—');
+    monitor.addBinding(live, 'fps', {
+      readonly:   true,
+      label:      'FPS',
+      interval:   pollMs,
+      format:     (v: number) => v.toFixed(1),
+    });
     monitor.addBinding(perf.stats, 'fps', {
-      readonly: true,
-      label:    'FPS',
-      view:     'graph',
-      min:      0,
-      max:      120,
-      interval: 250,
+      readonly:   true,
+      label:      'FPS trend',
+      view:       'graph',
+      min:        0,
+      max:        120,
+      interval:   pollMs,
+    });
+    monitor.addBinding(live, 'cpuMs', {
+      readonly:   true,
+      label:      'CPU ms',
+      interval:   pollMs,
+      format:     fmtMs,
     });
     monitor.addBinding(perf.stats, 'cpuMs', {
-      readonly: true,
-      label:    'CPU ms',
-      view:     'graph',
-      min:      0,
-      max:      33,
-      interval: 250,
+      readonly:   true,
+      label:      'CPU trend',
+      view:       'graph',
+      min:        0,
+      max:        33,
+      interval:   pollMs,
     });
     if (perf.hasGpuTiming) {
+      monitor.addBinding(live, 'gpuMs', {
+        readonly:   true,
+        label:      'GPU ms (scene)',
+        interval:   pollMs,
+        format:     fmtGpu,
+      });
       monitor.addBinding(perf.stats, 'gpuMs', {
-        readonly: true,
-        label:    'GPU ms',
-        view:     'graph',
-        min:      0,
-        max:      16,
-        interval: 250,
+        readonly:   true,
+        label:      'GPU (scene) trend',
+        view:       'graph',
+        min:        0,
+        max:        16,
+        interval:   pollMs,
       });
     }
   }
@@ -631,11 +610,8 @@ export function defaultParams(): Params {
     shape: 'cube',
     n_d: 1.272,
     V_d: 2.0,
-    pillLen: 300,
-    pillShort: 300,
-    pillThick: 300,
-    edgeR: 30,
     refractionStrength: 0.2,
+    shapes:      defaultShapesParams(),
     refractionMode: 'exact',
     temporalJitter: true,
     projection: 'perspective',
@@ -644,14 +620,6 @@ export function defaultParams(): Params {
     aaMode: 'taa',
     paused: false,
     historyAlpha: 0.2,
-    waveAmp: 20,
-    waveWavelength: 300,
-    diamondSize: 200,
-    diamondWireframe: false,
-    diamondFacetColor: false,
-    diamondTirDebug: false,
-    diamondTirMaxBounces: 6,
-    diamondView: 'free',
     envmapEnabled: true,
     // Exposure = 0.25 keeps typical HDRI peaks (studio strip-lights at
     // 50-200, sunny sky at 5-20) inside the [0, 2] display range without
@@ -665,5 +633,15 @@ export function defaultParams(): Params {
 }
 
 export function mergeParams(base: Params, patch: Partial<Params>): Params {
-  return { ...base, ...patch };
+  const s = patch.shapes;
+  const shapes = s
+    ? {
+        pill:    { ...base.shapes.pill,    ...s.pill },
+        prism:   { ...base.shapes.prism,   ...s.prism },
+        cube:    { ...base.shapes.cube,    ...s.cube },
+        plate:   { ...base.shapes.plate,   ...s.plate },
+        diamond: { ...base.shapes.diamond, ...s.diamond },
+      }
+    : base.shapes;
+  return { ...base, ...patch, shapes };
 }

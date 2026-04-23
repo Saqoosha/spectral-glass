@@ -4,7 +4,13 @@ import type { EnvmapTex } from '../envmap';
 import type { History } from './history';
 import type { Intermediate } from './postprocess';
 import vsSrc from '../shaders/fullscreen.wgsl?raw';
-import fsSrc from '../shaders/dispersion.wgsl?raw';
+import dispersionFrame from '../shaders/dispersion/frame.wgsl?raw';
+import dispersionSdfPrimitives from '../shaders/dispersion/sdf_primitives.wgsl?raw';
+import dispersionScene from '../shaders/dispersion/scene.wgsl?raw';
+import dispersionTrace from '../shaders/dispersion/trace.wgsl?raw';
+import dispersionSpectral from '../shaders/dispersion/spectral.wgsl?raw';
+import dispersionProxy from '../shaders/dispersion/proxy.wgsl?raw';
+import dispersionFragment from '../shaders/dispersion/fragment.wgsl?raw';
 import diamondSrc from '../shaders/diamond.wgsl?raw';
 import {
   diamondWgslConstants,
@@ -14,7 +20,7 @@ import {
 
 // Draw-call vertex count — max across all shapes, so one draw covers both
 // the cube topology (pill/prism/cube/plate) AND the diamond's convex-hull
-// mesh. The maxVerts guard at the top of vs_proxy (src/shaders/dispersion.wgsl)
+// mesh. The maxVerts guard at the top of vs_proxy (src/shaders/dispersion/proxy.wgsl)
 // clips the upper range for non-diamond shapes to a degenerate off-screen
 // vertex. Both per-shape counts are injected into WGSL via
 // diamondWgslConstants() so the CUBE_VERTS array size + the maxVerts guard
@@ -47,18 +53,28 @@ export async function createPipeline(
   //      generated in src/math/diamond.ts. Must appear before any WGSL that
   //      references DIAMOND_*_N / DIAMOND_*_O etc.
   //   2. fullscreen.wgsl — vertex shader for fs_main / fs_bg passes.
-  //   3. dispersion.wgsl — Frame struct, uniform binding, trace framework
-  //      (sceneSdf, sphereTrace, fs_main, vs_proxy).
-  //   4. diamond.wgsl — sdfDiamond / hitDiamondPillIdx / diamondProxyVertex.
-  //      Placed LAST because it references the Frame struct and uniform
-  //      binding declared in step 3; WGSL resolves its function calls
-  //      (sceneSdf → sdfDiamond, vs_proxy → diamondProxyVertex) across the
-  //      whole module, so forward references out of dispersion.wgsl work.
+  //   3. src/shaders/dispersion/*.wgsl — split by concern: frame/uniforms,
+  //      sdf primitives, scene aggregate, trace + analytic exits, spectral
+  //      helpers, proxy mesh + vs_proxy, fragment (fs_bg/fs_main).
+  //   4. diamond.wgsl — sdfDiamond / hitDiamondPillIdx / diamondProxyVertex /
+  //      diamondAnalyticExit. Placed after sdf_primitives, before scene.wgsl
+  //      so sceneSdf → sdfDiamond resolves; vs_proxy → diamondProxyVertex
+  //      also resolves (forward refs are legal in WGSL).
   // Injecting at pipeline build time rather than hand-copying the constants
   // into diamond.wgsl keeps TS as the single source of truth for the geometry.
+  const dispersionCore = [
+    dispersionFrame,
+    dispersionSdfPrimitives,
+    diamondSrc,
+    dispersionScene,
+    dispersionTrace,
+    dispersionSpectral,
+    dispersionProxy,
+    dispersionFragment,
+  ].join('\n');
   const module = device.createShaderModule({
     label: 'dispersion',
-    code:  diamondWgslConstants() + vsSrc + '\n' + fsSrc + '\n' + diamondSrc,
+    code:  diamondWgslConstants() + vsSrc + '\n' + dispersionCore,
   });
 
   // Surface WGSL diagnostics immediately — the default WebGPU path swallows compile

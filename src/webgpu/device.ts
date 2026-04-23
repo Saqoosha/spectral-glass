@@ -19,8 +19,10 @@ export async function initGpu(
   if (!('gpu' in navigator)) return { kind: 'no-webgpu' };
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
   if (!adapter) return { kind: 'no-adapter' };
-  // Opportunistically enable timestamp-query for the in-render perf HUD. Not
-  // fatal if unavailable (e.g. older Chromium, some integrated GPUs).
+  // GPU ms in the HUD uses timestamp queries + resolve / `mapAsync` readback.
+  // Enable whenever the adapter supports it so perf is visible by default;
+  // `main.ts` throttles readback to every other frame to keep UI overhead low.
+  // Not fatal if unavailable (older Chromium, some iGPUs).
   const wantTimestamp = adapter.features.has('timestamp-query');
   const device = await adapter.requestDevice(
     wantTimestamp ? { requiredFeatures: ['timestamp-query'] } : undefined,

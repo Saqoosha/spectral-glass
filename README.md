@@ -68,8 +68,9 @@ Requires a WebGPU-capable browser (Chrome / Edge 120+, Safari 18+).
 | Presets | Subtle pill · Strong dispersion · Prism rainbow · Rotating cube · Wavy plate |
 | Materials | 10 real-world glasses (water → BK7 → SF flints → diamond → moissanite) + 4 fantasy (n_d up to 3.5, V_d down to 2) |
 
-Add `?perf=1` to the URL to enable the GPU timestamp HUD — timings are
-published on `window._perf.samples`. Check **Show proxy** in the UI to tint
+The **Perf** panel shows **GPU ms** by default when the browser exposes WebGPU
+`timestamp-query`. Add `?perf=1` (or `?perf`) to also log samples on
+`window._perf` for benchmarks. Check **Show proxy** in the UI to tint
 every proxy fragment pink and see the rasterised silhouette.
 
 ## Technical approach
@@ -215,7 +216,7 @@ src/
 │   ├── pipeline.ts             Bg + proxy pipelines + shared bind groups + encodeScene
 │   ├── postprocess.ts          Intermediate rgba16f target + passthrough/FXAA pipelines + encodePost
 │   ├── mipmap.ts               Fullscreen-blit mipmap generator (used by photo.ts)
-│   ├── perf.ts                 GPU timestamp harness (?perf=1)
+│   ├── perf.ts                 GPU timestamp harness (default when supported)
 │   └── uniforms.ts             Typed uniform buffer writer
 └── shaders/
     ├── fullscreen.wgsl         Fullscreen triangle vertex shader

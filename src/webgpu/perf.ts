@@ -3,8 +3,9 @@
 // readback buffer on demand. `record()` uses a double-buffered ping-pong so the
 // CPU can read frame N-1 while frame N is still in flight.
 //
-// The timestamp period is reported by the spec as "nanoseconds per tick" on
-// most implementations; we convert to milliseconds on read.
+// Spec: resolved values are uint64 **nanoseconds** (§20.4). Browsers also apply
+// `coarsen time` to queue timestamps for security, so deltas often look stepped
+// or nearly constant — that is not a bug. `t1 - t0` is the scene render pass.
 
 export type Perf = {
   readonly querySet: GPUQuerySet;
@@ -64,11 +65,17 @@ export function createPerf(device: GPUDevice): Perf {
       const slot = slots[1 - writeSlot]!;  // the one we just wrote to
       if (!slot.inFlight) return null;
       await slot.readBuf.mapAsync(GPUMapMode.READ);
-      const view = new BigUint64Array(slot.readBuf.getMappedRange().slice(0));
+      // Read timestamps before unmap. Avoid `getMappedRange().slice(0)` — that
+      // copied 16 B every frame and could trigger periodic GC + main-thread
+      // hitches (felt like ~1s stutters while dragging) on top of mapAsync.
+      const range = slot.readBuf.getMappedRange();
+      const view  = new BigUint64Array(range);
+      const t0    = view[0]!;
+      const t1    = view[1]!;
       slot.readBuf.unmap();
       slot.inFlight = false;
-      const deltaNs = view[1]! - view[0]!;
-      return Number(deltaNs) / 1e6;  // ns → ms
+      if (t1 < t0) return null;  // counter reset or invalid pair (rare per spec)
+      return Number(t1 - t0) / 1e6;  // ns → ms
     },
   };
 }
