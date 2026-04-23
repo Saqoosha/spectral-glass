@@ -368,11 +368,9 @@ async function main(): Promise<void> {
 
       // Plate forces a square XY face (hy ≡ hx) so pillShort is effectively
       // unused. Plate's wave lives under `shapes.plate` →
-      // `frame.waveAmp` (separate uniform). `pill.edgeR` is now the rounded-
-      // corner radius for the rim that smooths the wavy front Z face into
-      // the flat side X / Y faces — same role as in cube/pill/prism, so the
-      // same `min(edgeR, halfSize)` clamp applies (edgeR ≥ smallest halfSize
-      // would invert the rounded-box SDF into degenerate geometry).
+      // `frame.waveAmp` (separate uniform). For plate, `pill.edgeR` is the
+      // rim fillet (same `min(edgeR, halfSize)` idea as pill/cube). Prism has
+      // sharp SDF (no fillet) — the loop below forces `edgeR = 0` for it.
       //
       // Diamond ignores per-pill halfSize entirely on the SDF side (shader
       // reads `frame.diamondSize`), but we still write halfSize to the
