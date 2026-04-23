@@ -136,6 +136,8 @@ export type Params = {
   // but multiplies the fetch size by 4× per step (1K ~ 2MB, 2K ~ 6MB,
   // 4K ~ 25MB). See ENVMAP_SIZES in src/envmapList.ts.
   envmapSize: EnvmapSize;
+  /** Background image for refraction: Picsum fetch, or HTML textarea (HTML-in-Canvas). */
+  bgSource: 'photo' | 'html';
 };
 
 // Object-style `options` are reordered by Tweakpane (often by `String(value)` or
@@ -182,6 +184,10 @@ const ENVMAP_SIZE_PANE_OPTIONS: { text: string; value: EnvmapSize }[] = ENVMAP_S
   text: s.toUpperCase(),
   value: s,
 }));
+const BG_SOURCE_PANE_OPTIONS: { text: string; value: Params['bgSource'] }[] = [
+  { text: 'Picsum only', value: 'photo' },
+  { text: 'Picsum + text (HTML)', value: 'html' },
+];
 
 type Preset = {
   label: string;
@@ -307,6 +313,8 @@ export function initUi(
    *  boot (so we didn't download anything), avoiding the fallback
    *  gradient rendering after the user opted back in. */
   onEnvmapEnabled:  () => void = () => {},
+  /** When set, shows Background controls for HTML-in-Canvas. */
+  htmlBackground:   { supported: true; focusEditor: () => void } | null = null,
 ): Pane {
   const pane = new Pane({ title: 'Spectral Dispersion', expanded: true });
 
@@ -444,8 +452,30 @@ export function initUi(
     // writeFrame into `frame.envmapRotation`.
     min: ENVMAP_ROTATION_MIN, max: ENVMAP_ROTATION_MAX, step: Math.PI / 180, label: 'Rotation (rad)',
   });
-  const reloadPhotoBtn = env.addButton({ title: 'Reload photo' });
+  const reloadPhotoBtn  = env.addButton({ title: 'Reload photo' });
+  const randomPhotoBtn  = env.addButton({ title: 'Random photo' });
   reloadPhotoBtn.on('click', reloadPhoto);
+  randomPhotoBtn.on('click', reloadPhoto);
+
+  let bgSourceBinding: ReturnType<typeof env.addBinding> | null = null;
+  let editHtmlBgBtn: ReturnType<typeof env.addButton> | null = null;
+  if (htmlBackground) {
+    bgSourceBinding = env.addBinding(params, 'bgSource', {
+      label: 'Background',
+      options: BG_SOURCE_PANE_OPTIONS,
+    });
+    bgSourceBinding.on('change', () => {
+      syncEnvHdrControls();
+      pane.refresh();
+      onChange();
+      markSceneChanged();
+    });
+    editHtmlBgBtn = env.addButton({ title: 'Edit text…' });
+    editHtmlBgBtn.on('click', () => {
+      if (params.bgSource !== 'html') return;
+      htmlBackground.focusEditor();
+    });
+  }
 
   function syncEnvHdrControls(): void {
     const on = params.envmapEnabled;
@@ -454,8 +484,18 @@ export function initUi(
     randomPanoramaBtn.hidden  = !on;
     envmapExposureBinding.hidden = !on;
     envmapRotationBinding.hidden  = !on;
-    // Background photo reload (Picsum) — only relevant when not using HDR for reflections.
-    reloadPhotoBtn.hidden = on;
+    const htmlOn = htmlBackground !== null && params.bgSource === 'html';
+    // Picsum: "Random photo" fetches a new seed (HTML underlay + GPU texture) whenever
+    // HDR is off, or the background is the HTML+photo composite (even with HDR on).
+    randomPhotoBtn.hidden = on && !htmlOn;
+    // Legacy "Reload" only when a lone Picsum pass would be visible (not superseded by Random).
+    reloadPhotoBtn.hidden = on || htmlOn || (!on && params.bgSource === 'photo');
+    if (bgSourceBinding) {
+      bgSourceBinding.hidden = false;
+    }
+    if (editHtmlBgBtn) {
+      editHtmlBgBtn.hidden = !htmlOn;
+    }
   }
   syncEnvHdrControls();
 
@@ -645,6 +685,9 @@ export function defaultParams(): Params {
     envmapRotation: 0,
     envmapSlug: DEFAULT_ENVMAP_SLUG,
     envmapSize: DEFAULT_ENVMAP_SIZE,
+    // Prefer the HTML layer when the browser exposes HTML-in-Canvas; main
+    // maps back to Picsum if `copyElementImageToTexture` is missing.
+    bgSource: 'html',
   };
 }
 

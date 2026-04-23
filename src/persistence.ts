@@ -41,6 +41,7 @@ const MODES         = new Set<Params['refractionMode']>(['exact', 'approx']);
 const PROJECTIONS   = new Set<Params['projection']>(['ortho', 'perspective']);
 const SAMPLE_COUNTS = new Set<Params['sampleCount']>([3, 8, 16, 32, 64]);
 const AA_MODES      = new Set<AaMode>(['none', 'fxaa', 'taa']);
+const BG_SOURCES    = new Set<Params['bgSource']>(['photo', 'html']);
 // DIAMOND_VIEWS derives from the canonical list in math/diamond.ts, so
 // adding a new preset is a one-site change there — the runtime allow-list
 // and the compile-time union can't drift. The older pattern (hand-written
@@ -126,6 +127,9 @@ function validateParams(u: unknown): Partial<Params> {
   if (typeof p.envmapSize === 'string'
     && (ENVMAP_SIZES as readonly string[]).includes(p.envmapSize)) {
     out.envmapSize = p.envmapSize as EnvmapSize;
+  }
+  if (typeof p.bgSource === 'string' && BG_SOURCES.has(p.bgSource as Params['bgSource'])) {
+    out.bgSource = p.bgSource as Params['bgSource'];
   }
   return out;
 }

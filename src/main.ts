@@ -1,8 +1,16 @@
 import { initGpu, resizeCanvas, needsSrgbOetf } from './webgpu/device';
 import { createPipeline, encodeScene, rebuildBindGroups } from './webgpu/pipeline';
+import {
+  copyHtmlLayerToTexture,
+  createHtmlBackgroundTexture,
+  destroyHtmlBackgroundTexture,
+  isValidHtmlBgLayer,
+  supportsHtmlInCanvas,
+} from './htmlBgTexture';
+import type { PhotoTex } from './photo';
 import { createFrameBuffer, writeFrame } from './webgpu/uniforms';
 import { createPerf } from './webgpu/perf';
-import { loadPhoto, destroyPhoto } from './photo';
+import { loadPhoto, destroyPhoto, picsumPhotoUrl } from './photo';
 import { loadEnvmap, createDefaultEnvmap, destroyEnvmap, type EnvmapTex } from './envmap';
 import { DEFAULT_ENVMAP_SLUG, envmapUrl, isKnownSlug, pickRandomSlug } from './envmapList';
 import { attachDrag, defaultPills, ensurePillInstanceCount, type Pill } from './pills';
@@ -67,7 +75,9 @@ async function main(): Promise<void> {
   const ctx = init;
 
   const frameBuf = createFrameBuffer(ctx.device);
-  let photoNow   = await loadPhoto(ctx.device);
+  let photoSeed  = Date.now();
+  const bootPhoto = await loadPhoto(ctx.device, photoSeed);
+  let photoNow   = bootPhoto.photo;
   // Default envmap is a synthetic sky/horizon gradient — ships without
   // network cost so pipeline creation is offline. The real HDRI is
   // fetched asynchronously after createPipeline returns; bind groups
@@ -79,8 +89,24 @@ async function main(): Promise<void> {
   const pl       = await createPipeline(ctx, frameBuf, photoNow, envmapNow, history);
   const post     = await createPostProcess(ctx, initSize.width, initSize.height);
 
-  const stored = loadStored();
-  const params = mergeParams(defaultParams(), stored?.params ?? {});
+  const stored   = loadStored();
+  const params   = mergeParams(defaultParams(), stored?.params ?? {});
+  const htmlBgEl         = document.getElementById('html-bg-root');
+  const htmlBgForeground = document.getElementById('html-bg-foreground');
+  const htmlBgPhoto      = document.getElementById('html-bg-photo');
+  const htmlInCanvasReady =
+    supportsHtmlInCanvas(ctx.device) &&
+    htmlBgEl instanceof HTMLElement &&
+    isValidHtmlBgLayer(ctx.canvas, htmlBgEl);
+  if (!htmlInCanvasReady && params.bgSource === 'html') {
+    params.bgSource = 'photo';
+  }
+  /** HTML-in-Canvas layer uploaded to GPU when `params.bgSource === 'html'`. */
+  let htmlPhoto: PhotoTex | null = null;
+  const getActivePhoto = (): PhotoTex => {
+    if (htmlInCanvasReady && params.bgSource === 'html' && htmlPhoto) return htmlPhoto;
+    return photoNow;
+  };
   let pills: Pill[] = stored?.pills && stored.pills.length > 0
     ? stored.pills.map((p) => ({ ...p }))
     : defaultPills(initSize.width, initSize.height);
@@ -112,17 +138,48 @@ async function main(): Promise<void> {
   let resetHistoryFrames = 2;
   const markSceneChanged = () => { resetHistoryFrames = 2; };
 
+  /** Same Picsum image as the GPU photo texture, for the HTML-in-Canvas snapshot. */
+  const syncPicsumUnderlay = (): void => {
+    if (!htmlInCanvasReady) return;
+    if (!(htmlBgPhoto instanceof HTMLImageElement) || !(htmlBgEl instanceof HTMLElement)) return;
+    const url = picsumPhotoUrl(photoSeed);
+    const rep = (): void => {
+      ctx.canvas.requestPaint?.();
+      queueMicrotask(() => { ctx.canvas.requestPaint?.(); });
+    };
+    htmlBgPhoto.onload = () => {
+      htmlBgEl.classList.remove('html-bg--gradient-fallback');
+      htmlBgPhoto.removeAttribute('hidden');
+      rep();
+    };
+    htmlBgPhoto.onerror = () => {
+      htmlBgPhoto.setAttribute('hidden', '');
+      htmlBgEl.classList.add('html-bg--gradient-fallback');
+      rep();
+    };
+    htmlBgPhoto.removeAttribute('hidden');
+    htmlBgPhoto.src = url;
+  };
+
   // Race guard: a slow photo fetch shouldn't overwrite a newer one if the user
   // clicks Reload twice quickly.
   let photoRevision = 0;
   const reloadPhoto = async () => {
     const rev = ++photoRevision;
     try {
-      const next = await loadPhoto(ctx.device, Date.now());
+      const nextSeed = Date.now();
+      const { photo: next, usedGradientFallback } = await loadPhoto(ctx.device, nextSeed);
       if (rev !== photoRevision) { destroyPhoto(next); return; }
+      if (usedGradientFallback) {
+        destroyPhoto(next);
+        showNotice('Picsum photo fetch failed — previous image kept.');
+        return;
+      }
       const old = photoNow;
-      photoNow = next;
-      rebuildBindGroups(ctx, pl, frameBuf, photoNow, envmapNow, history);
+      photoNow   = next;
+      photoSeed  = nextSeed;
+      syncPicsumUnderlay();
+      rebuildBindGroups(ctx, pl, frameBuf, getActivePhoto(), envmapNow, history);
       markSceneChanged();
       // Hold off the destroy until pending GPU work referencing `old` has drained.
       ctx.device.queue.onSubmittedWorkDone()
@@ -157,7 +214,7 @@ async function main(): Promise<void> {
       envmapNow = next;
       envmapRealLoaded = true;
       params.envmapSlug = slug;
-      rebuildBindGroups(ctx, pl, frameBuf, photoNow, envmapNow, history);
+      rebuildBindGroups(ctx, pl, frameBuf, getActivePhoto(), envmapNow, history);
       markSceneChanged();
       persist();
       ctx.device.queue.onSubmittedWorkDone()
@@ -219,8 +276,53 @@ async function main(): Promise<void> {
       // closure and flips on the first successful fetch.
       if (!envmapRealLoaded) void reloadEnvmap(params.envmapSlug);
     },
+    htmlInCanvasReady
+      ? {
+        supported: true,
+        focusEditor: () => {
+          if (!(htmlBgForeground instanceof HTMLElement)) return;
+          htmlBgForeground.classList.add('html-bg--editing');
+          htmlBgForeground.tabIndex = 0;
+          htmlBgForeground.focus();
+        },
+      }
+      : null,
   );
   paneRef = pane;
+
+  if (htmlInCanvasReady) {
+    ctx.canvas.layoutSubtree = true;
+    const onPaint = (): void => {
+      if (params.bgSource !== 'html' || !htmlPhoto) return;
+      if (!(htmlBgEl instanceof HTMLElement)) return;
+      copyHtmlLayerToTexture(ctx.device.queue, htmlBgEl, htmlPhoto.texture);
+    };
+    ctx.canvas.addEventListener('paint', onPaint);
+    if (htmlBgForeground instanceof HTMLElement) {
+      htmlBgForeground.addEventListener('input', () => { ctx.canvas.requestPaint?.(); });
+      htmlBgForeground.addEventListener('blur', () => {
+        htmlBgForeground.classList.remove('html-bg--editing');
+        htmlBgForeground.tabIndex = -1;
+      });
+    }
+    new ResizeObserver(() => {
+      if (params.bgSource === 'html') ctx.canvas.requestPaint?.();
+    }).observe(ctx.canvas, { box: 'device-pixel-content-box' });
+    // If the GPU Picsum path fell back to the gradient, do not point the
+    // underlay <img> at a URL that may still load when fetch failed
+    // (CORS / timing skew), which would desync HTML vs GPU.
+    if (bootPhoto.usedGradientFallback) {
+      if (htmlBgEl instanceof HTMLElement && htmlBgPhoto instanceof HTMLImageElement) {
+        htmlBgEl.classList.add('html-bg--gradient-fallback');
+        htmlBgPhoto.setAttribute('hidden', '');
+      }
+      showNotice('Picsum photo fetch failed — background uses gradient until reload.', 6_000);
+    } else {
+      syncPicsumUnderlay();
+    }
+  } else if (bootPhoto.usedGradientFallback) {
+    showNotice('Picsum photo fetch failed — using gradient background.', 6_000);
+  }
 
   // Kick off the initial HDR panorama fetch. Pipeline already has the
   // default gradient envmap bound, so the first few frames render fine
@@ -360,9 +462,30 @@ async function main(): Promise<void> {
       const resized = resizeHistory(ctx.device, history, width, height);
       if (resized !== history) {
         history = resized;
-        rebuildBindGroups(ctx, pl, frameBuf, photoNow, envmapNow, history);
+        rebuildBindGroups(ctx, pl, frameBuf, getActivePhoto(), envmapNow, history);
       }
       resizeIntermediate(ctx.device, post, width, height);
+
+      if (htmlInCanvasReady) {
+        if (params.bgSource === 'html') {
+          if (!htmlPhoto || htmlPhoto.width !== width || htmlPhoto.height !== height) {
+            if (htmlPhoto) {
+              destroyHtmlBackgroundTexture(htmlPhoto);
+              htmlPhoto = null;
+            }
+            htmlPhoto = createHtmlBackgroundTexture(ctx.device, width, height);
+            rebuildBindGroups(ctx, pl, frameBuf, getActivePhoto(), envmapNow, history);
+            markSceneChanged();
+            ctx.canvas.requestPaint?.();
+            // One extra paint after layout commits (first snapshot can be empty otherwise).
+            queueMicrotask(() => { ctx.canvas.requestPaint?.(); });
+          }
+        } else if (htmlPhoto) {
+          destroyHtmlBackgroundTexture(htmlPhoto);
+          htmlPhoto = null;
+          rebuildBindGroups(ctx, pl, frameBuf, photoNow, envmapNow, history);
+        }
+      }
 
       const uf = frameFieldsFromParams(params);
 
@@ -457,7 +580,7 @@ async function main(): Promise<void> {
       const cameraZ = cameraZForFov(params.fov, height);
       writeFrame(ctx.device, frameBuf, {
         resolution:         [width, height],
-        photoSize:          [photoNow.width, photoNow.height],
+        photoSize:          [getActivePhoto().width, getActivePhoto().height],
         n_d:                uf.n_d,
         V_d:                uf.V_d,
         sampleCount:        N,

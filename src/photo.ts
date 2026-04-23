@@ -9,8 +9,29 @@ export type PhotoTex = {
 
 const PHOTO_FORMAT: GPUTextureFormat = 'rgba8unorm-srgb';
 
-export async function loadPhoto(device: GPUDevice, seed = Date.now()): Promise<PhotoTex> {
-  const url = `https://picsum.photos/seed/${seed}/1920/1080`;
+export const PICSUM_WIDTH  = 1920;
+export const PICSUM_HEIGHT = 1080;
+
+export type LoadPhotoResult = {
+  photo: PhotoTex;
+  /** True when the Picsum fetch/decode path failed and a 256×256 gradient was substituted. */
+  usedGradientFallback: boolean;
+};
+
+/** Picsum URL — keep in sync with `loadPhoto` and the HTML underlay image. */
+export function picsumPhotoUrl(
+  seed: number,
+  w: number = PICSUM_WIDTH,
+  h: number = PICSUM_HEIGHT,
+): string {
+  return `https://picsum.photos/seed/${seed}/${w}/${h}`;
+}
+
+export async function loadPhoto(
+  device: GPUDevice,
+  seed: number = Date.now(),
+): Promise<LoadPhotoResult> {
+  const url = picsumPhotoUrl(seed);
   // Keep the catch tight to the network + decode path so GPU upload
   // errors (createTexture / copyExternalImageToTexture / mipmap gen)
   // bubble up to the uncapturederror handler instead of being disguised
@@ -23,9 +44,9 @@ export async function loadPhoto(device: GPUDevice, seed = Date.now()): Promise<P
     bitmap = await createImageBitmap(blob, { colorSpaceConversion: 'none' });
   } catch (err) {
     console.error('[photo] fetch/decode failed, using gradient fallback:', err);
-    return createGradientTexture(device);
+    return { photo: createGradientTexture(device), usedGradientFallback: true };
   }
-  return uploadBitmap(device, bitmap);
+  return { photo: uploadBitmap(device, bitmap), usedGradientFallback: false };
 }
 
 function uploadBitmap(device: GPUDevice, bitmap: ImageBitmap): PhotoTex {
@@ -44,7 +65,7 @@ function uploadBitmap(device: GPUDevice, bitmap: ImageBitmap): PhotoTex {
   device.queue.copyExternalImageToTexture({ source: bitmap }, { texture }, [width, height, 1]);
   bitmap.close();
   generateMipmaps(device, texture, PHOTO_FORMAT, mipLevelCount);
-  return { texture, sampler: sharedSampler(device), width, height };
+  return { texture, sampler: getPhotoDisplaySampler(device), width, height };
 }
 
 // Fallback: a 256×256 vertical gradient that still exercises refraction/dispersion
@@ -76,7 +97,7 @@ function createGradientTexture(device: GPUDevice): PhotoTex {
   });
   device.queue.writeTexture({ texture }, bytes, { bytesPerRow: W * 4 }, [W, H, 1]);
   generateMipmaps(device, texture, PHOTO_FORMAT, mipLevelCount);
-  return { texture, sampler: sharedSampler(device), width: W, height: H };
+  return { texture, sampler: getPhotoDisplaySampler(device), width: W, height: H };
 }
 
 // Keyed by GPUDevice to stay correct across hypothetical device-lost
@@ -84,6 +105,11 @@ function createGradientTexture(device: GPUDevice): PhotoTex {
 // app treats device-lost as fatal, but using a WeakMap avoids locking that
 // behavior in and keeps the two sampler caches consistent.
 const samplerCache = new WeakMap<GPUDevice, GPUSampler>();
+/** Shared linear+mipmap sampler for `rgba8unorm-srgb` photos (Picsum + HTML-in-Canvas). */
+export function getPhotoDisplaySampler(device: GPUDevice): GPUSampler {
+  return sharedSampler(device);
+}
+
 function sharedSampler(device: GPUDevice): GPUSampler {
   let sampler = samplerCache.get(device);
   if (sampler) return sampler;

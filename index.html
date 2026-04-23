@@ -5,14 +5,279 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Spectral Glass</title>
     <style>
-      html, body { margin: 0; padding: 0; background: #000; color: #fff; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
-      canvas { display: block; width: 100vw; height: 100vh; }
-      #fallback { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; text-align: center; padding: 2rem; font-size: 1.1rem; line-height: 1.6; }
+      html, body { margin: 0; padding: 0; background: #000; color: #fff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+      #gpu {
+        display: block;
+        position: relative;
+        width: 100vw;
+        height: 100vh;
+      }
+      #html-bg-root {
+        position: absolute;
+        left: 0; top: 0; right: 0; bottom: 0;
+        box-sizing: border-box;
+        min-width: 100%;
+        min-height: 100%;
+        overflow: hidden;
+        /* Let drags on the open area hit the canvas; only the text rail re-enables. */
+        pointer-events: none;
+        background: #0c0c10;
+      }
+      #html-bg-root.html-bg--gradient-fallback {
+        background: linear-gradient(165deg, #3a2848 0%, #0c4a5c 40%, #0a1620 100%);
+      }
+      #html-bg-photo {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        object-position: center;
+        z-index: 0;
+        display: block;
+        pointer-events: none;
+      }
+      #html-bg-photo[hidden] {
+        display: none;
+      }
+      /* Left scrollable strip: Tweakpane uses the right edge of the window; this is wide
+         so the lit gradient covers more of the Picsum photo, fading out toward the center. */
+      #html-bg-foreground {
+        position: absolute;
+        top: 0; left: 0; bottom: 0; right: auto;
+        z-index: 1;
+        box-sizing: border-box;
+        width: min(100%, 48rem);
+        max-width: 72vw;
+        margin: 0;
+        border: 0;
+        padding: max(14px, 2.4vmin) max(20px, 2.6vmin) max(24px, 4vmin) max(18px, 2.4vmin);
+        /* Critical for scroll: bounded height + overflow */
+        height: 100%;
+        max-height: 100%;
+        min-height: 0;
+        overflow-y: auto;
+        overflow-x: hidden;
+        overscroll-behavior: contain;
+        scrollbar-gutter: stable;
+        -webkit-overflow-scrolling: touch;
+        outline: none;
+        color: #f4f0e8;
+        text-shadow: 0 0.08em 0.25em rgba(0,0,0,0.85), 0 0.02em 0.06em #000;
+        pointer-events: auto;
+        /* Stronger on the left, fade by ~65% of panel width, then to clear — “covers more photo from the left” */
+        background: linear-gradient(
+          90deg,
+          rgba(4, 6, 14, 0.82) 0%,
+          rgba(5, 7, 18, 0.58) 28%,
+          rgba(4, 6, 12, 0.28) 55%,
+          rgba(0, 0, 0, 0) 100%
+        );
+        border-radius: 0 6px 6px 0;
+      }
+      #html-bg-foreground .html-t-hero {
+        margin: 0 0 0.1em;
+        font-weight: 800;
+        font-size: clamp(1.9rem, 2.2vw + 0.75rem, 2.9rem);
+        line-height: 1.1;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: #fff8f0;
+      }
+      #html-bg-foreground .html-t-mono {
+        margin: 0.12em 0 0.5em;
+        font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+        font-size: clamp(0.8rem, 0.5vw + 0.5rem, 1.02rem);
+        line-height: 1.4;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: #a8d4ff;
+      }
+      #html-bg-foreground .html-t-h3 {
+        margin: 1em 0 0.4em;
+        font-size: clamp(1.05rem, 0.45vw + 0.75rem, 1.3rem);
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: #ffd4a0;
+        border-bottom: 1px solid rgba(255, 212, 160, 0.25);
+        padding-bottom: 0.25em;
+      }
+      #html-bg-foreground .html-t-h3:first-of-type { margin-top: 0.4em; }
+      #html-bg-foreground .html-t-kicker {
+        margin: 0.4em 0 0.25em;
+        font-size: clamp(0.9rem, 0.4vw + 0.65rem, 1.05rem);
+        font-weight: 600;
+        letter-spacing: 0.2em;
+        text-transform: uppercase;
+        color: #ffd4a0;
+      }
+      #html-bg-foreground .html-t-lead {
+        margin: 0.35em 0 0.5em;
+        font-size: clamp(1.05rem, 0.45vw + 0.75rem, 1.3rem);
+        line-height: 1.55;
+        font-weight: 500;
+        color: #e8e4dc;
+      }
+      #html-bg-foreground .html-t-body {
+        margin: 0.4em 0 0.55em;
+        font-size: clamp(0.95rem, 0.35vw + 0.7rem, 1.1rem);
+        line-height: 1.6;
+        color: #c8c4b8;
+      }
+      #html-bg-foreground .html-t-list {
+        margin: 0.35em 0 0.5em 1.1em;
+        padding: 0;
+        font-size: clamp(0.9rem, 0.3vw + 0.7rem, 1.05rem);
+        line-height: 1.6;
+        color: #b8b4a8;
+      }
+      #html-bg-foreground .html-t-list.tight { margin-top: 0.2em; }
+      #html-bg-foreground .html-t-code {
+        display: block;
+        margin: 0.5em 0;
+        padding: 0.55em 0.6em;
+        font-family: ui-monospace, Menlo, monospace;
+        font-size: clamp(0.82rem, 0.3vw + 0.6rem, 0.95rem);
+        line-height: 1.45;
+        color: #9ecfff;
+        background: rgba(0, 0, 0, 0.45);
+        border-radius: 4px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      #html-bg-foreground .html-t-credit {
+        margin: 0.65em 0 0.5em;
+        font-size: clamp(0.75rem, 0.2vw + 0.6rem, 0.9rem);
+        line-height: 1.6;
+        letter-spacing: 0.04em;
+        color: rgba(255,255,255,0.55);
+      }
+      #html-bg-foreground.html-bg--editing {
+        box-shadow: inset 0 0 0 1px rgba(122, 184, 255, 0.4);
+        border-radius: 0 5px 5px 0;
+      }
+      #fallback { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; text-align: center; padding: 2rem; font-size: 1.1rem; line-height: 1.6; z-index: 10; }
       #fallback.visible { display: flex; }
     </style>
   </head>
   <body>
-    <canvas id="gpu"></canvas>
+    <canvas id="gpu" layoutsubtree>
+      <div id="html-bg-root" class="html-bg-root">
+        <img id="html-bg-photo" class="html-bg-photo" alt="" width="1920" height="1080" crossorigin="anonymous" hidden />
+        <div
+          id="html-bg-foreground"
+          class="html-bg-foreground"
+          contenteditable="true"
+          spellcheck="false"
+          tabindex="-1"
+          title="Left column — Tweakpane uses the right. Scroll with wheel. Edit via “Edit text…”. Drag glass in the open area to the right."
+        >
+          <h1 class="html-t-hero">Spectral glass</h1>
+          <p class="html-t-mono">README · WebGPU · spectral dispersion</p>
+
+          <h2 class="html-t-h3">What this is</h2>
+          <p class="html-t-lead">
+            Realtime <strong>physically accurate spectral dispersion</strong> through Apple “Liquid Glass”-style
+            floating pills, prisms, tumbling wavy plates, and round brilliant cut diamonds. This samples the
+            <strong>full visible spectrum</strong> per wavelength and reconstructs colour with
+            <strong>CIE 1931</strong> colour-matching — not the usual “shift R/G/B IORs” trick.
+          </p>
+          <p class="html-t-credit">Live: saqoosha.github.io/Spectral-Glass/ · Chrome/Edge 120+ or Safari 18+</p>
+
+          <h2 class="html-t-h3">Why not just shift R/G/B?</h2>
+          <p class="html-t-body">
+            A 3-sample RGB IOR looks like a <em>three-band</em> rainbow. Real glass is a continuous spectrum.
+            Strong dispersion shows the difference: 3-band fringing on every edge vs a continuous rainbow.
+            In the app, <strong>hold Z</strong> to force <code>N = 3</code> and compare to your sample count.
+          </p>
+
+          <h2 class="html-t-h3">Controls (from README)</h2>
+          <ul class="html-t-list">
+            <li><strong>Drag</strong> a shape — move it (cube / diamond: circular hit radius)</li>
+            <li><strong>Z</strong> (hold) — force N = 3 (fake RGB) for A/B</li>
+            <li><strong>Space</strong> — random pill positions</li>
+            <li><strong>R</strong> — new Picsum (when HDR env is off, same as Reload photo)</li>
+            <li><strong>T / S / B / F</strong> — diamond view presets (diamond only)</li>
+            <li><strong>Tweakpane</strong> — IOR, Abbe, samples, shape, materials, env, AA…</li>
+          </ul>
+
+          <h2 class="html-t-h3">Presets &amp; materials</h2>
+          <p class="html-t-body">
+            <strong>Presets</strong> — Subtle pill, Strong dispersion, Prism rainbow, Rotating cube, Wavy plate.
+            <strong>Materials</strong> — Real catalog from water / BK7 / flints / diamond / moissanite to fantasy
+            glasses (high <em>n</em><sub>d</sub>, low <em>V</em><sub>d</sub>) for extreme fire.
+          </p>
+
+          <h2 class="html-t-h3">Environment &amp; reflections</h2>
+          <p class="html-t-body">
+            Optional <strong>HDR env</strong> (Poly Haven CC0): background, refracted rays, and reflections sample the
+            same linear panorama — exposure + yaw without re-downloading. Legacy path: Picsum background with
+            UV-offset reflection hack when env is off.
+          </p>
+
+          <h2 class="html-t-h3">Antialiasing</h2>
+          <ul class="html-t-list tight">
+            <li><strong>None</strong> — no spatial or temporal AA (history EMA still runs)</li>
+            <li><strong>FXAA</strong> — single-frame 9-tap; no ghosting, slightly soft</li>
+            <li><strong>TAA</strong> — sub-pixel jitter + motion-vector history reprojection; converges when paused</li>
+          </ul>
+          <p class="html-t-body">
+            Post pass applies <strong>sRGB OETF</strong> once (FXAA luma in perceptual space, blend in linear).
+            <code>?perf</code> logs GPU ms when timestamp queries exist.
+          </p>
+
+          <h2 class="html-t-h3">Diamond &amp; TIR</h2>
+          <p class="html-t-body">
+            Brilliant cut uses a <strong>TIR bounce chain</strong> (1–32 bounces, default 6): internal reflects until
+            an analytic exit refracts out — that’s the sparkle. Pink debug = bounce budget exhausted; approx mode
+            skips the chain for stability.
+          </p>
+
+          <h2 class="html-t-h3">Quick start</h2>
+          <code class="html-t-code">bun install
+bun run dev     # http://localhost:5173
+bun run test
+bun run build</code>
+          <p class="html-t-body">Requires a WebGPU-capable browser. HTML background: Chromium + <strong>CanvasDrawElement</strong> flag. This strip is on the <strong>left</strong> (wide, over the photo) so the Tweakpane inspector can stay on the <strong>right</strong> — drag and orbit glass in the open area in the middle and to the right.</p>
+
+          <h2 class="html-t-h3">Pipeline in short</h2>
+          <ul class="html-t-list tight">
+            <li>Two passes: cheap fullscreen <strong>bg + history</strong>, then instanced 3D proxy; heavy refraction only inside the silhouette.</li>
+            <li>Five SDF families: pill, prism, rounded cube, wavy plate, 58-facet Tolkowsky <strong>diamond</strong> with analytic exits + TIR chain.</li>
+            <li>Cauchy + Abbe (glTF dispersion), Wyman CIE XYZ, per-λ Fresnel, per-λ sRGB weighting, jitter + TAA/FXAA, HDR env optional.</li>
+            <li>Photo mipmaps, temporal history (EMA + paused progressive mean), reprojection for rotating shapes.</li>
+          </ul>
+          <p class="html-t-body">
+            <strong>localStorage</strong> persists validated params and pill layout; <strong>pagehide</strong> flushes
+            the debounced saver. Math in <code>src/math/</code> is mirrored in WGSL; Vitest is the ground truth.
+          </p>
+
+          <h2 class="html-t-h3">GPU time (README sample)</h2>
+          <p class="html-t-body">
+            On Apple Silicon ~1290×1070, 4 shapes, p50: pill <code>N=8</code> ≈1.7&nbsp;ms, <code>N=32</code> ≈6.4&nbsp;ms;
+            cube <code>N=8</code> ≈1.05&nbsp;ms, <code>N=64</code> ≈3.2&nbsp;ms — inside a 16.67&nbsp;ms frame. Background
+            pixels are cheap; the per-λ loop dominates in the proxy silhouette.
+          </p>
+
+          <h2 class="html-t-h3">References</h2>
+          <p class="html-t-body">
+            glTF <strong>KHR_materials_dispersion</strong> (Cauchy+Abbe) · Wyman–Sloan–Shirley CIE XYZ (JCGT 2013) ·
+            Wilkie et al. hero wavelength (EGSR 2014) · Peters Spectral rendering notes ·
+            blog.maximeheckel.com refraction &amp; dispersion
+          </p>
+
+          <h2 class="html-t-h3">This panel</h2>
+          <p class="html-t-body">
+            The Picsum underlay is the <strong>same image</strong> the GPU fetches. This wide, scrollable
+            <strong>left</strong> strip (with a long fade) keeps Tweakpane’s space on the right. For
+            <strong>HTML + CanvasDrawElement</strong>, the DOM is rasterized into a texture each paint — you’re
+            reading that composite here. Scroll with the <strong>wheel</strong>; <strong>Edit text…</strong> in the
+            inspector to change copy; click the open canvas to drag glass again.
+          </p>
+        </div>
+      </div>
+    </canvas>
     <div id="fallback">
       This demo needs a WebGPU-capable browser.<br />
       Try Chrome/Edge 120+ on macOS/Windows/Linux, or Safari 18+ on macOS/iOS.
