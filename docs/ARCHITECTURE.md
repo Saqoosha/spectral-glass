@@ -12,8 +12,8 @@ refraction shader only runs on fragments the proxy actually covers.
 │                                                                      │
 │  1. resize canvas + history + post-intermediate if needed            │
 │  2. push params → pills (hx/hy/hz/edgeR)                             │
-│  3. writeFrame → uniform buffer (672 B: scalars + 6×mat3 + plate    │
-│     + diamond + envmap 16B blocks + pills)                          │
+│  3. writeFrame → uniform buffer (688 B: scalars + 6×mat3 + plate    │
+│     + diamond 32B + envmap 16B blocks + pills)                     │
 │  4. scene pass (writes → intermediate(rgba16f) + history[write]):    │
 │     a. bg sub-pass: fullscreen triangle → fs_bg (photo + history)    │
 │     b. proxy sub-pass: instanced 3D proxy mesh → fs_main             │
@@ -93,8 +93,8 @@ fragment shader's rays will trace.
 | `src/math/{cauchy,wyman,srgb,sdfPill,sdfPrism,sdfCube,camera,cube,plate,diamond,diamondExit}.ts` | Pure functions mirrored by the WGSL of the same name. The vitest suite is the reference. `cube.ts` / `plate.ts` / `diamond.ts` precompute the tumble rotations (rz·rx for cube, rx·ry for plate, Rx·Ry for diamond) on the host so the shader avoids per-SDF-eval cos/sin. `diamond.ts` also generates a WGSL `const` block containing its Tolkowsky-derived facet plane coefficients AND the unfolded normal arrays the analytical exit iterates over — single source of truth. `diamondExit.ts` mirrors the ray-polytope analytical exit so its behaviour can be pinned by a vitest regression without GPU access. |
 | `src/hdr.ts` | Radiance .hdr (RGBE) decoder + round-trip encoder. Pure JS, no GPU dependency — tested via synthetic encode→decode round-trips. Supports the adaptive-RLE format Poly Haven ships (width 8-32767); legacy per-pixel RLE throws with a clear message. |
 | `src/envmap.ts`, `src/envmapList.ts` | HDR environment panorama loader. `envmap.ts` fetches from a URL, decodes via `hdr.ts`, converts RGB float → RGBA half-float (with an `F16_MAX_FINITE = 65504` clamp to stop bright HDR pixels from overflowing into +Inf and seeding NaN through the linear sampler), uploads to an rgba16f texture for linear-filtered IBL sampling. `envmapList.ts` curates Poly Haven CC0 HDRIs across studio / indoor / outdoor / sunset / night categories at 1K / 2K / 4K resolution and exposes a `pickRandomSlug` helper for the UI Random button. |
-| `src/shaders/dispersion.wgsl` | Trace/SDF framework: sphere-trace, sceneSdf dispatch, Cauchy, CIE, Fresnel, spectral accumulation, TIR fallback (with a 2-bounce chain for diamond in exact mode), `cubeAnalyticExit` + `plateAnalyticExit` + `backExit` dispatcher, proxy vertex + fragment shaders. Writes linear RGB to `@location(0)` — sRGB encoding now lives in postprocess.wgsl. |
-| `src/shaders/diamond.wgsl` | Diamond-specific geometry: sdfDiamond, `diamondAnalyticExit` (ray-polytope back-exit used by both the standard exit path and the 2-bounce TIR chain), hitDiamondPillIdx (TAA reprojection pivot picker), diamondProxyVertex (exact convex-hull proxy mesh). Concatenated after dispersion.wgsl at pipeline build time so diamond-only work stays isolated in one file. |
+| `src/shaders/dispersion.wgsl` | Trace/SDF framework: sphere-trace, sceneSdf dispatch, Cauchy, CIE, Fresnel, spectral accumulation, TIR fallback (diamond: configurable 1…32 internal bounces in exact mode, `diamondTirMaxBounces` uniform), `cubeAnalyticExit` + `plateAnalyticExit` + `backExit` dispatcher, proxy vertex + fragment shaders. Writes linear RGB to `@location(0)` — sRGB encoding now lives in postprocess.wgsl. |
+| `src/shaders/diamond.wgsl` | Diamond-specific geometry: sdfDiamond, `diamondAnalyticExit` (ray-polytope back-exit for the first exit and each TIR-bounce step), miss sentinel + inward-nudge to avoid bad `pWorld` on miss, hitDiamondPillIdx (TAA reprojection pivot picker), diamondProxyVertex (exact convex-hull proxy mesh). Concatenated after dispersion.wgsl at pipeline build time. |
 | `src/shaders/postprocess.wgsl` | Passthrough + FXAA fragment shaders. FXAA runs in perceptual (sRGB) luma for edge detection and blends color in linear space. Applies the sRGB OETF when the swapchain is non-sRGB. |
 | `src/persistence.ts` | localStorage read/write with schema versioning, field validation, legacy `taa: boolean` → `aaMode` migration, and a trailing-edge debounced saver (+ `flush()` for pagehide). |
 
@@ -115,16 +115,16 @@ offset 224 │ plateRotPrev:   mat3x3<f32>                         (48 B)
 offset 272 │ diamondRot:     mat3x3<f32>                         (48 B)
 offset 320 │ diamondRotPrev: mat3x3<f32>                         (48 B)
 offset 368 │ waveAmp, waveFreq, waveLipFactor, sceneTime         (16 B)
-offset 384 │ diamondSize, diamondWireframe, diamondFacetColor,   (16 B)
-           │   diamondTirDebug
-offset 400 │ envmapExposure, envmapRotation, envmapEnabled,      (16 B)
-           │   _pad
-offset 416 │ pills[0..8]     each pill is:                       (32 B each)
+offset 384 │ diamondSize, diamondWireframe, diamondFacetColor,   (32 B)
+           │   diamondTirDebug, diamondTirMaxBounces, _pad×3
+offset 416 │ envmapExposure, envmapRotation, envmapEnabled,      (16 B)
+           │   _envmapPad
+offset 432 │ pills[0..8]     each pill is:                       (32 B each)
            │   center.xyz, edgeR,   halfSize.xyz, _pad
 ```
 
-Total 672 bytes (80 B head + 6 × 48 B rotation matrices + 16 B plate
-wave/scene-time block + 16 B diamond params block + 16 B envmap params
+Total 688 bytes (80 B head + 6 × 48 B rotation matrices + 16 B plate
+wave/scene-time block + **32 B** diamond params block + 16 B envmap params
 block + 8 × 32 B pills).
 Uniform size is fixed — pills beyond `pillCount` are zeros.
 
@@ -149,11 +149,11 @@ Uniform size is fixed — pills beyond `pillCount` are zeros.
   pose matrix into BOTH `diamondRot` and `diamondRotPrev`, producing a
   zero motion vector so the frozen shape doesn't smear under TAA.
 - `diamondSize` is the girdle diameter in pixels (slider in `ui.ts`).
-  `diamondWireframe` / `diamondFacetColor` are debug-overlay flags — the
-  first draws facet edges via a top-two-plane-gap smoothstep, the
-  second replaces the refraction result with a flat per-facet colour so
-  coverage + adjacency can be cross-checked without chromatic noise.
-  All three are ignored when `shape != diamond`.
+  `diamondWireframe` / `diamondFacetColor` / `diamondTirDebug` are debug
+  flags; `diamondTirMaxBounces` (1…32, default 6) caps the exact-mode TIR
+  bounce loop. TIR debug tints unresolved pixels hot pink (bounce budget
+  exhausted, refract out still TIR) or orange (`diamondAnalyticExit` miss).
+  All are ignored when `shape != diamond`.
 - `taaEnabled` toggles temporal antialiasing. When on, `fs_main` jitters
   the primary ray by a per-pixel hash within ±0.5 px, and reads history at
   `fragCoord + (projected_prev_world − projected_curr_world)` — jitter
@@ -331,14 +331,11 @@ Five shapes. `sceneSdf` dispatches on the `shape` uniform:
   exact facet normal that comes out sidesteps the finite-diff gradient
   degeneracy at facet edges that previously sent TIR pixels to the
   external-reflection fallback and produced "other faces suddenly
-  appearing" artifacts during tumble. On TIR the diamond path does
-  **up to 2 bounces** (reflect the internal ray off the back facet, run the
-  analytical exit again to find the next facet, refract out there; repeat
-  once more if that also TIRs) so brilliant-cut sparkle renders as
-  physically meaningful light paths. The bounce chain is exact-mode only
-  — approx mode's shared hero-wavelength exit would produce frame-to-frame
-  facet-selection flicker when `heroLambda` jitters, so approx mode keeps
-  Phase A's reflSrc fallback for TIR pixels.
+  appearing" artifacts during tumble.   On TIR the diamond path runs a **bounded internal bounce loop** (count from
+  `diamondTirMaxBounces`, with a small origin nudge and miss guards) so
+  brilliant-cut sparkle uses meaningful paths. The chain is exact-mode
+  only — approx mode’s shared hero-wavelength exit would flicker with
+  `heroLambda` jitter, so approx keeps Phase A’s `reflSrc` TIR fallback.
 
 Sphere trace starts from a per-pixel ray origin and direction (see Camera
 above), marches with `HIT_EPS = 0.25` and `MIN_STEP = 0.5`. For pill and
@@ -392,7 +389,7 @@ for i in 0..N:
   else:            pExit = insideTrace(h.p, r1, internalMax), nBack = -sceneNormal(pExit)
   r2     = refract(r1, nBack, ior)
   // Failure-mode routing — see "Failure-mode fallbacks" below.
-  L      = TIR && diamond && !approx ? bounce_chain(r1, nBack, pExit) :
+  L      = TIR && diamond && !approx ? bounce_chain(r1, nBack, pExit; cap=diamondTirMaxBounces) :
            TIR                        ? reflSrc :
            NaN || OOB                 ? bg      :
                                         photo[uv_with_offset(r2)]
@@ -422,7 +419,7 @@ the table below lists four TIR/NaN/OOB rows in total:
 | Failure | Detection | Fallback | Why |
 |---|---|---|---|
 | Real TIR (non-diamond) | `dot(r2, r2) < 1e-4` AND not NaN | `reflSrc` | Physically correct — the wavelength is fully reflected by the front face |
-| Real TIR (diamond, exact mode) | `shape == diamond` AND `!useHero` | 2-bounce chain: reflect the internal ray, call `diamondAnalyticExit` from `curP + bounce * MIN_STEP`, try `refract`; repeat once more if that also TIRs. Sample `photo[uv_with_offset(r_out)]` on success. | What actually produces a brilliant cut's sparkle — light reflecting off a pavilion facet and exiting via a crown facet at a new angle. Only if the chain still TIRs after both bounces do we fall back to `bg` (silhouette blend — deliberately NOT `reflSrc`, which was the artifact this path replaces). `diamondTirDebug` paints the exhaustion fallback hot pink for diagnostic work. |
+| Real TIR (diamond, exact mode) | `shape == diamond` AND `!useHero` | Bounce loop up to `diamondTirMaxBounces` (default 6, max 32): each step reflects, calls `diamondAnalyticExit` with a nudged origin, tries `refract` out. On success, sample photo/envmap. If the chain exhausts, blend to `bg` or envmap `reflSrc` (not the old facet-unrelated `reflSrc` stand-in for that path). `diamondTirDebug` tints exhausted pixels pink (still TIR) or orange (analytic exit miss). |
 | Real TIR (diamond, approx mode) | `shape == diamond` AND `useHero` | `reflSrc` (Phase A fallback) | Approx mode shares hero's exit across λ. Running the bounce chain from that shared origin while heroLambda jitters frame-to-frame produces TIR-boundary flicker; we stick with reflSrc here until a per-λ solution (Phase C) lands. |
 | NaN r2 | `r2dot != r2dot` (self-comparison catches NaN) | `bg` (local pixel's photo sample) | Renders the same colour as miss-path neighbours so the silhouette stays clean instead of showing a single bright reflection sample |
 | UV out of bounds | `coverUv(uvOff)` not in [0, 1]² | `bg` | The mirror-repeat sampler would otherwise fold a wildly-off UV back to an unrelated photo region (bright photo → white speckle, dark → black) |
@@ -460,8 +457,8 @@ Apple Silicon.
 
 ## Testing
 
-Math modules are unit-tested (~85 tests, all pass — exact count drifts with
-each new case, see `bun run test`):
+Math modules and uniform wiring are unit-tested (160+ tests, all pass — exact
+count drifts with each new case, see `bun run test`):
 
 - `cauchyIor` at d-line, monotonicity, `V_d` sensitivity, 1.0 clamp.
 - `cieXyz` Y-peak near 555 nm, red dominance at 650 nm, blue at 450 nm, near-zero at UV/IR.
@@ -476,7 +473,7 @@ each new case, see `bun run test`):
 - Diamond unfolded plane arrays (Phase B) — counts per class (8 / 8 / 16 / 16 / 8), first entry matches the fundamental-wedge plane so SDF and analytical-exit stay consistent, normals unit-length + shared tilt within a class, consecutive normals differ by the expected rotation step (π/4 or π/8), every plane passes through its designated shared girdle corners (pins the "facets meet at shared corners" invariant through the analytical path as well).
 - Diamond analytical exit (`diamondAnalyticExit` JS mirror) — axis-aligned rays exit through the culet / table with the expected class and normal, horizontal rays at z=0 exit through the girdle cylinder, rays slightly above/below the girdle band exit through a crown/pavilion facet (band-rejection test), exit normal always satisfies `dot(n, rd) > 0` (ray leaves the half-space), exit point satisfies the reported facet's plane equation (consistency between which-class and what-point), vertical rays still find the table cap when the cylinder's `a > 1e-6` guard fires.
 - Diamond view presets — `top` preserves local +Z as world +Z, `side` rotates local +Z to world +Y, `bottom` rotates it to world -Z; all three preserve vector length (orthonormal).
-- `uniform layout drift detector` parses the WGSL `struct Frame` declaration and pins the field set + order (including `diamondRot` / `diamondRotPrev` / the diamond params slot) so anyone editing it gets nudged to update `src/webgpu/uniforms.ts` too.
+- `uniform layout drift detector` parses the WGSL `struct Frame` declaration and pins the field set + order (including `diamondRot` / `diamondRotPrev` / the diamond 32B params block) so anyone editing it gets nudged to update `src/webgpu/uniforms.ts` too.
 
 WGSL versions are hand-mirrored by the corresponding TS module; the TS tests
 act as the reference. Shader correctness beyond that is verified visually —

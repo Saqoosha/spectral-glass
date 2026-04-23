@@ -64,7 +64,7 @@ Requires a WebGPU-capable browser (Chrome / Edge 120+, Safari 18+).
 | **Space** | Shuffle pills to random positions |
 | **`R`** | Reload a new random Picsum photo |
 | **`T` / `S` / `B` / `F`** | Diamond view presets — **T**op (table toward camera) / **S**ide (girdle profile) / **B**ottom (culet toward camera) / **F**ree (tumble). No-op for other shapes. |
-| Tweakpane | IOR, Abbe, sample count, shape (pill / prism / cube / plate / diamond), dimensions, wave amp + wavelength (plate only), **diamond size** + view preset + **Wireframe** / **Facet color** debug overlays (diamond only), refraction strength, projection (ortho / perspective), FOV, temporal jitter, refraction mode, **Stop the world** (freeze rotation/wave while AA keeps converging), **AA** mode selector — `None` / `FXAA` (single-frame spatial filter) / `TAA` (sub-pixel jitter + motion-vector history reprojection), **Environment** panel — HDR panorama picker (curated Poly Haven HDRIs spanning studio / indoor / outdoor / sunset / night categories, selectable at 1K / 2K / 4K resolution — 2K default), exposure + rotation sliders, Random panorama button, Enabled toggle to A/B with the legacy reflSrc hack |
+| Tweakpane | IOR, Abbe, sample count, shape (pill / prism / cube / plate / diamond), dimensions, wave amp + wavelength (plate only), **diamond size** + view preset + **Wireframe** / **Facet color** + **TIR debug** (pink = bounce budget exhausted with refract still TIR; orange = analytic exit miss) + **TIR max bounces** 1…32 (default 6, higher = more work on TIR pixels) (diamond only), refraction strength, projection (ortho / perspective), FOV, temporal jitter, refraction mode, **Stop the world** (freeze rotation/wave while AA keeps converging), **AA** mode selector — `None` / `FXAA` (single-frame spatial filter) / `TAA` (sub-pixel jitter + motion-vector history reprojection), **Environment** panel — HDR panorama picker (curated Poly Haven HDRIs spanning studio / indoor / outdoor / sunset / night categories, selectable at 1K / 2K / 4K resolution — 2K default), exposure + rotation sliders, Random panorama button, Enabled toggle to A/B with the legacy reflSrc hack |
 | Presets | Subtle pill · Strong dispersion · Prism rainbow · Rotating cube · Wavy plate |
 | Materials | 10 real-world glasses (water → BK7 → SF flints → diamond → moissanite) + 4 fantasy (n_d up to 3.5, V_d down to 2) |
 
@@ -87,7 +87,8 @@ every proxy fragment pink and see the rasterised silhouette.
   together, keeping thickness uniform — and a **round brilliant cut
   diamond** (58-facet Tolkowsky-ideal polytope, D_8-folded to 5 plane
   evaluations + table cap + girdle cylinder, with an analytical back-exit
-  and a **2-bounce TIR chain** to reproduce the characteristic sparkle).
+  and a **configurable TIR bounce chain** (1–32 internal reflections, default 6)
+  to reproduce the characteristic sparkle).
   Cube, plate, and diamond proxy corners are transformed by
   `transpose(rot)` so the rasterised silhouette tracks the shader's
   rotation exactly — no √3 bounding-box slack. Diamond ships its own
@@ -123,15 +124,15 @@ every proxy fragment pink and see the rasterised silhouette.
   average the noise, so N=8 stratified looks like N=16 uniform.
 - **TIR fallback.** When `refract()` returns zero at the back face, the
   wavelength contributes the external reflection instead of dropping — no
-  black holes inside the cube. For **diamond**, that fallback first tries
-  a short bounce chain (up to 2 internal reflections — each reflects off
-  the current facet, analytically finds the next facet, and tries to
-  refract out). This is where a brilliant cut's actual sparkle comes from
-  — light reflected off a pavilion facet exits via a crown facet at a new
-  angle. Only if the bounce chain still TIRs after 2 iterations does the
-  wavelength blend back into the silhouette. Approx mode sticks with the
-  shared hero-wavelength reflSrc fallback to avoid frame-to-frame flicker
-  from hero-jitter-driven bounce-path changes.
+  black holes inside the cube. For **diamond** (exact refraction only), a
+  bounce chain runs first: up to **N** internal reflections (UI “TIR max
+  bounces”, 1…32, default 6), each time reflecting off the current facet,
+  finding the next exit with `diamondAnalyticExit`, and trying to refract
+  out. This is where a brilliant cut’s sparkle comes from. If the chain
+  exhausts without a valid exit direction, the sample blends to silhouette
+  `bg` (or envmap-backed `reflSrc` when the HDR map is on). **Approx mode**
+  skips the chain and uses the shared hero `reflSrc` TIR path to avoid
+  flicker when `heroLambda` jitters.
 - **HDR environment map (unified scene).** Background, refraction, AND
   reflection all sample a real linear-HDR panorama (Poly Haven CC0
   HDRIs, curated across studio / indoor / outdoor / sunset / night
@@ -222,8 +223,8 @@ src/
     ├── dispersion.wgsl         SDFs (pill/prism/cube/plate) + analytic exits + TAA reprojection + spectral dispersion fragment
     └── diamond.wgsl            Diamond-specific WGSL: `sdfDiamond` (D_8 folded),
                                  `diamondAnalyticExit` (ray-polytope back-exit
-                                 used by the 2-bounce TIR chain), wireframe + facet-
-                                 colour debug overlays, exact convex-hull proxy
+                                 used by the TIR bounce chain), wireframe + facet-
+                                 colour + TIR debug overlays, exact convex-hull proxy
                                  mesh, TAA pill-index picker
 
 tests/                          Vitest unit tests for each math module
@@ -233,7 +234,7 @@ docs/
 
 Math modules in `src/math/` are mirrored 1:1 by functions in
 `src/shaders/dispersion.wgsl` and `src/shaders/diamond.wgsl` — the vitest
-suite (~85 tests, exact count drifts as cases are added) acts as the
+suite (run `bun run test` — 160+ cases, count drifts as cases are added) acts as the
 reference implementation for the shader. The diamond plane coefficients
 are injected from `diamond.ts` into the shader source at pipeline build
 time so the host-side math and GPU-side constants can't drift.

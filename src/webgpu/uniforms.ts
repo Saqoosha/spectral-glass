@@ -76,8 +76,7 @@ const TOTAL_FLOATS    = HEAD_FLOATS
 const TOTAL_BYTES     = TOTAL_FLOATS * 4;
 
 // Reused across frames so we don't allocate a fresh Float32Array every tick.
-// Total size grows with the field set — see TOTAL_BYTES above (currently 672 B
-// after the diamond block expanded to 32 B for diamondTirMaxBounces + pad).
+// Total size grows with the field set — see TOTAL_BYTES above (172 floats → 688 B).
 const scratch = new Float32Array(TOTAL_FLOATS);
 
 export function createFrameBuffer(device: GPUDevice): GPUBuffer {

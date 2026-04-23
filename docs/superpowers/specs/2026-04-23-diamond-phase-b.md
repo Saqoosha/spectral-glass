@@ -3,6 +3,12 @@
 **Decision date**: 2026-04-23 (approved by user)
 **Context branch**: commit `db86855` (Phase A complete, review-fix-loop CLEAN, 106/106 tests)
 
+> **Subsequent code (not retro-edited below):** the live shader uses a
+> **configurable** max internal bounce count (`diamondTirMaxBounces`, 1…32,
+> default 6), a **scaled/clamped** bounce-origin nudge, `diamondAnalyticExit`
+> miss handling, and **TIR debug** tints (pink = chain exhaust / still TIR;
+> orange = analytic miss). See `README.md` and `docs/ARCHITECTURE.md`.
+
 **Spec revisions**:
 - 2026-04-23: extended bounce budget from 1 to 2 after observing that the
   Tolkowsky cut's top-view light-return path requires 2 internal
