@@ -4,10 +4,11 @@
 
 A realtime WebGPU demo of **physically accurate spectral dispersion** through
 Apple "Liquid Glass"-style floating pills, triangular prisms, rotating cubes,
-and tumbling wavy plates. Unlike the common "shift R/G/B IORs" hack that most
-web implementations use (including Three.js's `MeshPhysicalMaterial.dispersion`),
-this samples the full visible spectrum per-wavelength and reconstructs the
-final color via CIE 1931 color matching functions.
+tumbling wavy plates, and round brilliant cut diamonds. Unlike the common
+"shift R/G/B IORs" hack that most web implementations use (including Three.js's
+`MeshPhysicalMaterial.dispersion`), this samples the full visible spectrum
+per-wavelength and reconstructs the final color via CIE 1931 color matching
+functions.
 
 ![Cubes over rooftops](docs/images/demo-default.png)
 
@@ -58,11 +59,12 @@ Requires a WebGPU-capable browser (Chrome / Edge 120+, Safari 18+).
 
 | Input | Action |
 |---|---|
-| Drag a shape | Move it around the canvas (cube uses a circular hit radius) |
+| Drag a shape | Move it around the canvas (cube / diamond use a circular hit radius) |
 | **`Z`** (hold) | Force `N = 3` (fake RGB dispersion) for A/B comparison |
 | **Space** | Shuffle pills to random positions |
 | **`R`** | Reload a new random Picsum photo |
-| Tweakpane | IOR, Abbe, sample count, shape (pill / prism / cube / plate), dimensions, wave amp + wavelength (plate only), refraction strength, projection (ortho / perspective), FOV, temporal jitter, refraction mode, **Stop the world** (freeze rotation/wave while AA keeps converging), **AA** mode selector — `None` / `FXAA` (single-frame spatial filter) / `TAA` (sub-pixel jitter + motion-vector history reprojection) |
+| **`T` / `S` / `B` / `F`** | Diamond view presets — **T**op (table toward camera) / **S**ide (girdle profile) / **B**ottom (culet toward camera) / **F**ree (tumble). No-op for other shapes. |
+| Tweakpane | IOR, Abbe, sample count, shape (pill / prism / cube / plate / diamond), dimensions, wave amp + wavelength (plate only), **diamond size** + view preset + **Wireframe** / **Facet color** debug overlays (diamond only), refraction strength, projection (ortho / perspective), FOV, temporal jitter, refraction mode, **Stop the world** (freeze rotation/wave while AA keeps converging), **AA** mode selector — `None` / `FXAA` (single-frame spatial filter) / `TAA` (sub-pixel jitter + motion-vector history reprojection) |
 | Presets | Subtle pill · Strong dispersion · Prism rainbow · Rotating cube · Wavy plate |
 | Materials | 10 real-world glasses (water → BK7 → SF flints → diamond → moissanite) + 4 fantasy (n_d up to 3.5, V_d down to 2) |
 
@@ -77,14 +79,19 @@ every proxy fragment pink and see the rasterised silhouette.
   refraction shader only runs on fragments inside the proxy silhouette.
   Back-face culling (CCW-outward 3D → CW NDC after Y-flip) gives exactly one
   invocation per covered pixel.
-- **3D SDFs, four shapes.** Pill (stadium XY + rounded Z), prism
+- **3D SDFs, five shapes.** Pill (stadium XY + rounded Z), prism
   (isosceles triangle in YZ extruded in X), rotating cube (rounded box +
-  per-frame `rot * (p - center)` via `cubeRotation(time)`), and tumbling
+  per-frame `rot * (p - center)` via `cubeRotation(time)`), tumbling
   **wavy plate** — a thick square slab whose midsurface bends in Z along
   `waveAmp · sin(kx+t) · sin(ky+t)` while both faces ride that midsurface
-  together, keeping thickness uniform. Cube and plate proxy corners are
-  transformed by `transpose(rot)` so the rasterised silhouette tracks the
-  shader's rotation exactly — no √3 bounding-box slack.
+  together, keeping thickness uniform — and a **round brilliant cut
+  diamond** (58-facet Tolkowsky-ideal polytope, D_8-folded to 5 plane
+  evaluations + table cap + girdle cylinder). Cube, plate, and diamond
+  proxy corners are transformed by `transpose(rot)` so the rasterised
+  silhouette tracks the shader's rotation exactly — no √3 bounding-box
+  slack. Diamond ships its own 46-triangle exact-hull proxy instead of the
+  cube AABB the other shapes use, so sharp-facet silhouettes don't waste
+  fragments on AABB slack.
 - **Ortho or perspective projection.** UI toggle. Ortho keeps the flat Liquid
   Glass aesthetic; perspective uses a pinhole camera at `(w/2, h/2, cameraZ)`
   with `cameraZ = (height/2) / tan(fov/2)` derived from the user-facing FOV.
@@ -152,7 +159,7 @@ every proxy fragment pink and see the rasterised silhouette.
 
 ```
 src/
-├── main.ts                     Frame loop + glue
+├── main.ts                     Frame loop + glue (+ T/S/B/F diamond-view hotkeys)
 ├── math/                       Pure math modules (unit-tested)
 │   ├── cauchy.ts               Wavelength → IOR (glTF formulation)
 │   ├── wyman.ts                Wyman CIE XYZ approximation
@@ -161,7 +168,10 @@ src/
 │   ├── sdfPrism.ts             Triangular prism SDF (mirrors WGSL version)
 │   ├── sdfCube.ts              Rounded box / cube SDF (mirrors WGSL version)
 │   ├── cube.ts                 rz·rx rotation columns for the tumbling cube
-│   └── plate.ts                rx·ry rotation columns for the tumbling plate
+│   ├── plate.ts                rx·ry rotation columns for the tumbling plate
+│   └── diamond.ts              Tolkowsky-ideal brilliant-cut proportions,
+│                               facet-plane derivations, WGSL `const` emitter,
+│                               tumble + fixed-view rotation matrices
 ├── persistence.ts              localStorage: validated load, debounced save, pagehide flush
 ├── photo.ts                    Picsum fetch → GPU texture (w/ gradient fallback)
 ├── pills.ts                    Pill state + shape-aware pointer drag
@@ -177,7 +187,10 @@ src/
 └── shaders/
     ├── fullscreen.wgsl         Fullscreen triangle vertex shader
     ├── postprocess.wgsl        Passthrough + FXAA fragment shaders + sRGB OETF
-    └── dispersion.wgsl         SDFs (pill/prism/cube/plate) + analytic exits + TAA reprojection + spectral dispersion fragment
+    ├── dispersion.wgsl         SDFs (pill/prism/cube/plate) + analytic exits + TAA reprojection + spectral dispersion fragment
+    └── diamond.wgsl            Diamond-specific WGSL: `sdfDiamond` (D_8 folded),
+                                 wireframe + facet-colour debug overlays, exact
+                                 convex-hull proxy mesh, TAA pill-index picker
 
 tests/                          Vitest unit tests for each math module
 docs/
@@ -185,9 +198,11 @@ docs/
 ```
 
 Math modules in `src/math/` are mirrored 1:1 by functions in
-`src/shaders/dispersion.wgsl` — the vitest suite (~55 tests, exact count
-drifts as cases are added) acts as the reference implementation for the
-shader.
+`src/shaders/dispersion.wgsl` and `src/shaders/diamond.wgsl` — the vitest
+suite (~85 tests, exact count drifts as cases are added) acts as the
+reference implementation for the shader. The diamond plane coefficients
+are injected from `diamond.ts` into the shader source at pipeline build
+time so the host-side math and GPU-side constants can't drift.
 
 ## Design
 

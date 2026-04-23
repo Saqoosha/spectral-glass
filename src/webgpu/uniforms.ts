@@ -1,7 +1,7 @@
 import type { Pill } from '../pills';
 import { cubeRotationColumns } from '../math/cube';
 import { plateRotationColumns } from '../math/plate';
-import { diamondRotationColumns } from '../math/diamond';
+import { diamondRotationColumns, diamondViewRotationColumns, type DiamondView } from '../math/diamond';
 
 export const MAX_PILLS = 8;
 
@@ -29,6 +29,8 @@ export type FrameParams = {
   readonly waveFreq:           number;  // plate: angular frequency (rad/px). Wavelength ≈ 2π/waveFreq.
   readonly diamondSize:        number;  // diamond: girdle diameter (px). Ignored for other shapes.
   readonly diamondWireframe:   boolean; // diamond: overlay facet edges on top of the rendering for debugging.
+  readonly diamondFacetColor:  boolean; // diamond: flat-shade each facet class with a distinct debug colour.
+  readonly diamondView:        DiamondView; // diamond: 'free' tumbles, fixed views pin for reference-checking.
   readonly pills:              readonly Pill[];
 };
 
@@ -114,8 +116,18 @@ export function writeFrame(device: GPUDevice, buf: GPUBuffer, p: FrameParams): v
   scratch.set(cubeRotationColumns(p.prevSceneTime),    base); base += CUBE_ROT_PREV_FLOATS;
   scratch.set(plateRotationColumns(p.sceneTime),       base); base += PLATE_ROT_FLOATS;
   scratch.set(plateRotationColumns(p.prevSceneTime),   base); base += PLATE_ROT_PREV_FLOATS;
-  scratch.set(diamondRotationColumns(p.sceneTime),     base); base += DIAMOND_ROT_FLOATS;
-  scratch.set(diamondRotationColumns(p.prevSceneTime), base); base += DIAMOND_ROT_PREV_FLOATS;
+  // Diamond rotation: 'free' uses the tumble animation driven by sceneTime;
+  // the fixed views pin to a canonical pose and write the same matrix into
+  // current AND prev so the TAA reprojection sees zero motion vector and
+  // doesn't smear the frozen shape.
+  if (p.diamondView === 'free') {
+    scratch.set(diamondRotationColumns(p.sceneTime),     base); base += DIAMOND_ROT_FLOATS;
+    scratch.set(diamondRotationColumns(p.prevSceneTime), base); base += DIAMOND_ROT_PREV_FLOATS;
+  } else {
+    const fixed = diamondViewRotationColumns(p.diamondView);
+    scratch.set(fixed, base); base += DIAMOND_ROT_FLOATS;
+    scratch.set(fixed, base); base += DIAMOND_ROT_PREV_FLOATS;
+  }
 
   // Plate wave parameters: amp (px), freq (rad/px), and the precomputed
   // Lipschitz safety factor `1/sqrt(1 + (amp·freq)²)` that sdfWavyPlate
@@ -146,9 +158,11 @@ export function writeFrame(device: GPUDevice, buf: GPUBuffer, p: FrameParams): v
   // WGSL's array-of-struct layout rules hold without per-element padding.
   const diamondParamsBase = plateParamsBase + PLATE_PARAMS_FLOATS;
   scratch[diamondParamsBase + 0] = p.diamondSize;
-  scratch[diamondParamsBase + 1] = p.diamondWireframe ? 1 : 0;
-  // slots 2..3 left at scratch.fill(0)'s zero — reserved for future diamond
-  // parameters (star angle, crown angle overrides) without another layout bump.
+  scratch[diamondParamsBase + 1] = p.diamondWireframe  ? 1 : 0;
+  scratch[diamondParamsBase + 2] = p.diamondFacetColor ? 1 : 0;
+  // slot 3 left at scratch.fill(0)'s zero — reserved for a future diamond
+  // parameter (angle override, girdle thickness, etc.) without another
+  // layout bump.
 
   const pillBase  = diamondParamsBase + DIAMOND_PARAMS_FLOATS;
   const pillCount = Math.min(p.pills.length, MAX_PILLS);

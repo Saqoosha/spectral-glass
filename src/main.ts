@@ -125,7 +125,7 @@ async function main(): Promise<void> {
   const perfStats = createPerfStats();
   const tickFrameTimer = makeFrameTimer(perfStats);
 
-  initUi(params, () => { void reloadPhoto(); }, persist, markSceneChanged, {
+  const pane = initUi(params, () => { void reloadPhoto(); }, persist, markSceneChanged, {
     stats:        perfStats,
     hasGpuTiming: ctx.hasTimestamp,
   });
@@ -165,6 +165,20 @@ async function main(): Promise<void> {
       persist();
     }
     if (k === 'r') { void reloadPhoto(); /* already markSceneChanged'd on success */ }
+    // Diamond view presets — snap to canonical poses for facet geometry
+    // checking. T/S/B/F mirror the Tweakpane dropdown so either path works.
+    // Only active when the diamond shape is selected (the param exists
+    // for other shapes too, but changing it would be a no-op so no point
+    // clearing the history).
+    if (params.shape === 'diamond' && (k === 't' || k === 's' || k === 'b' || k === 'f')) {
+      const nextView = k === 't' ? 'top' : k === 's' ? 'side' : k === 'b' ? 'bottom' : 'free';
+      if (params.diamondView !== nextView) {
+        params.diamondView = nextView;
+        pane.refresh();          // sync the dropdown so the UI reflects the hotkey
+        markSceneChanged();      // rotation jumps discontinuously — clear ghost trail
+        persist();
+      }
+    }
   };
   const onKeyUp = (e: KeyboardEvent) => {
     if (e.key.toLowerCase() === 'z') forceN3 = false;
@@ -360,6 +374,8 @@ async function main(): Promise<void> {
         // written so shape switching doesn't leave stale values.
         diamondSize:        params.diamondSize,
         diamondWireframe:   params.diamondWireframe,
+        diamondFacetColor:  params.diamondFacetColor,
+        diamondView:        params.diamondView,
         pills,
       });
 

@@ -46,13 +46,34 @@ const PAVILION_ANGLE_DEG = 40.75;
 /** Star facet inclination from horizontal. Flatter than the bezel — classic
  *  "ideal" star length of ~50% implies ≈22°. */
 const STAR_ANGLE_DEG = 22.0;
-/** Upper half (upper girdle) facet inclination from horizontal. Steeper than
- *  the bezel because the facet sits closer to the girdle and must meet the
- *  vertical girdle cylinder cleanly. */
-const UPPER_HALF_ANGLE_DEG = 42.0;
-/** Lower half (lower girdle) facet inclination from horizontal. Slightly
- *  steeper than the pavilion main for the same girdle-clearance reason. */
-const LOWER_HALF_ANGLE_DEG = 43.0;
+/** Upper half (upper girdle) facet inclination from horizontal. Hard upper
+ *  limit is 40° for THIS anchor/normal setup: at α = 40° the bezel-star-UH
+ *  three-way junction lands exactly on the φ = π/8 mirror (the D_8 wedge
+ *  boundary); at α > 40° the junction escapes the wedge, the bezel kite
+ *  can't close, and a green bezel sliver appears between star and upper-half.
+ *
+ *  39.9° pushes the tilt as close to that ceiling as the numerics tolerate.
+ *  The effect on the rendered shape: the UH-star touch point (the star's
+ *  lower tip on the crown) drops to z ≈ 0.125 — about 71 % of the way from
+ *  the girdle up to the table plane, matching classic ideal-cut references.
+ *  Lower α would raise this tip toward the table and make the star look
+ *  short / stubby; higher α can't fit inside the wedge.
+ *
+ *  Real brilliant cuts often cite UH ≈ 42° but under different anchor
+ *  conventions (e.g. UH anchored partway along the bezel-UH kite edge
+ *  rather than on the actual girdle rim), so those numbers don't transfer
+ *  directly to this geometry. */
+const UPPER_HALF_ANGLE_DEG = 39.9;
+/** Lower half (lower girdle) facet inclination from horizontal. Must stay
+ *  above PAVILION_ANGLE_DEG (40.75°) — below that the LH plane lies INSIDE
+ *  the pavilion main and never surfaces, so the facet vanishes. 42° sits
+ *  just above the limit, matching GIA "Excellent" lower-half proportions
+ *  (LH apex at ~75 % pavilion depth, leaving room for a visible pavilion
+ *  main near the culet). Unlike the upper half, there's no "star" equivalent
+ *  on the pavilion side — the LH plane only has to stay valid against the
+ *  pavilion and the wedge mirror, so the 40° cap that constrains UH doesn't
+ *  apply here. */
+const LOWER_HALF_ANGLE_DEG = 42.0;
 /** Girdle band height as a fraction of girdle diameter. 2% is "medium" —
  *  within GIA's acceptable range for commercial cuts. */
 const GIRDLE_THICKNESS_RATIO = 0.02;
@@ -191,16 +212,25 @@ const BEZEL_PLANE:   FacetPlane = planeFromAngles(PHI_BEZEL,   CROWN_ANGLE,     
 const STAR_PLANE:    FacetPlane = planeFromAngles(PHI_STAR,    STAR_ANGLE,       +1,
   [R_TABLE_APOTHEM * Math.cos(PHI_STAR), R_TABLE_APOTHEM * Math.sin(PHI_STAR), H_TOP]);
 
-/** Upper half — anchored at the girdle-top on the facet's centreline
- *  (φ=π/16, halfway between a bezel and a star). This places the facet's
- *  lower edge on the girdle band. */
+/** Upper half — anchored at the girdle-top CORNER at φ=0 (shared with the
+ *  adjacent bezel and the mirrored neighbour UH across it). With the normal
+ *  centred at φ=π/16, the plane automatically also passes through the
+ *  girdle-top corner at φ=π/8 because the chord between the two corners is
+ *  perpendicular to the facet's centreline (cos(π/8 − π/16) = cos(π/16)
+ *  identity collapses both anchor candidates to the same offset). So this
+ *  single anchor pins BOTH girdle-rim corners the facet's bottom edge has
+ *  to touch — anchoring at φ=π/16 (the earlier convention) would place the
+ *  plane on the circumscribing-octagon rim, outside the girdle circle, and
+ *  leave visible gaps where adjacent UHs fail to meet at the shared corners. */
 const UPPER_HALF_PLANE: FacetPlane = planeFromAngles(PHI_UPPER_HALF, UPPER_HALF_ANGLE, +1,
-  [R_GIRDLE * Math.cos(PHI_UPPER_HALF), R_GIRDLE * Math.sin(PHI_UPPER_HALF), H_GIRDLE_HALF]);
+  [R_GIRDLE, 0, H_GIRDLE_HALF]);
 
-/** Lower half — mirror of the upper half across the girdle plane, anchored at
- *  the girdle-bottom on its centreline. */
+/** Lower half — mirror of the upper half across the girdle plane. Anchored
+ *  at the girdle-bottom corner at φ=0 for the same reason: the plane is
+ *  pinned through the two shared girdle-rim corners at φ=0 and φ=π/8, and
+ *  an anchor at φ=π/16 would push it off the girdle circle. */
 const LOWER_HALF_PLANE: FacetPlane = planeFromAngles(PHI_LOWER_HALF, LOWER_HALF_ANGLE, -1,
-  [R_GIRDLE * Math.cos(PHI_LOWER_HALF), R_GIRDLE * Math.sin(PHI_LOWER_HALF), -H_GIRDLE_HALF]);
+  [R_GIRDLE, 0, -H_GIRDLE_HALF]);
 
 /** Pavilion main — shares the bezel's azimuth (φ = 0, through the table
  *  vertex above) as is standard for a round brilliant. The plane passes
@@ -229,6 +259,52 @@ const DIAMOND_SPIN_RATE = 0.30;
  * applied first (local Y-axis) so the tilt stays fixed — spinning a tilted
  * diamond, not tilting a spinning one. Mirrors the "rx · ry" order plate uses.
  */
+/** Preset view angles for the "click / hotkey to rotate to a canonical
+ *  pose" flow. `free` is the default (tumble via `diamondRotationColumns`);
+ *  the fixed poses pin the diamond so facet geometry can be cross-checked
+ *  against a reference illustration without waiting for the right frame of
+ *  the tumble animation.
+ *
+ *  Convention (world +Z toward camera, +Y up):
+ *    - `top`    — table directly toward camera (identity rotation).
+ *    - `side`   — girdle axis horizontal, table up the screen
+ *                 (local +Z → world +Y via R_x(-π/2)).
+ *    - `bottom` — culet toward camera (R_x(π) flip).
+ */
+export type DiamondView = 'free' | 'top' | 'side' | 'bottom';
+
+/**
+ * Fixed-view rotation matrix columns in the same WGSL-padded 12-float layout
+ * as `diamondRotationColumns`. Callers pair this with a `view !== 'free'`
+ * guard and pass the same result as both the current AND previous-frame
+ * rotation — a fixed pose produces zero motion vector for the TAA reprojection
+ * path, which is what we want when the shape is frozen.
+ */
+export function diamondViewRotationColumns(view: Exclude<DiamondView, 'free'>): Float32Array {
+  const out = new Float32Array(12);
+  // Row-major 3x3 expressed inline per preset, then written into the
+  // column-major + per-column-pad layout the WGSL mat3x3<f32> expects.
+  let m00 = 1, m01 = 0, m02 = 0;
+  let m10 = 0, m11 = 1, m12 = 0;
+  let m20 = 0, m21 = 0, m22 = 1;
+  if (view === 'side') {
+    // R_x(-π/2): local +Z → world +Y (table up), local +Y → world -Z (into screen).
+    m10 = 0; m11 = 0; m12 = 1;
+    m20 = 0; m21 = -1; m22 = 0;
+  } else if (view === 'bottom') {
+    // R_x(π): local +Z → world -Z (culet toward camera), local +Y → world -Y.
+    m11 = -1;
+    m22 = -1;
+  }
+  // Column 0 — image of the X basis
+  out[0]  = m00; out[1]  = m10; out[2]  = m20;
+  // Column 1 — image of the Y basis
+  out[4]  = m01; out[5]  = m11; out[6]  = m21;
+  // Column 2 — image of the Z basis
+  out[8]  = m02; out[9]  = m12; out[10] = m22;
+  return out;
+}
+
 export function diamondRotationColumns(time: number): Float32Array {
   // Same NaN/±Infinity guard as cube/plate: a poisoned rotation matrix slips
   // into the GPU uniform and gets silently "healed" by sceneNormal's

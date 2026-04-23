@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   diamondRotationColumns,
+  diamondViewRotationColumns,
   diamondWgslConstants,
   DIAMOND_HEIGHT_RATIO,
   DIAMOND_INTERNALS,
@@ -114,6 +115,45 @@ describe('diamondRotationColumns', () => {
   });
 });
 
+describe('diamondViewRotationColumns (fixed view presets)', () => {
+  it('top preset leaves local axes unrotated (identity — table directly toward camera)', () => {
+    const m = rowMajor(diamondViewRotationColumns('top'));
+    const z = mulMatVec(m, [0, 0, 1]);
+    expect(z[0]).toBeCloseTo(0, 6);
+    expect(z[1]).toBeCloseTo(0, 6);
+    expect(z[2]).toBeCloseTo(1, 6);  // local +Z stays on world +Z
+  });
+
+  it('side preset maps local +Z to world +Y (girdle axis vertical, profile visible)', () => {
+    const m = rowMajor(diamondViewRotationColumns('side'));
+    const z = mulMatVec(m, [0, 0, 1]);
+    expect(z[0]).toBeCloseTo(0, 6);
+    expect(z[1]).toBeCloseTo(1, 6);
+    expect(z[2]).toBeCloseTo(0, 6);
+  });
+
+  it('bottom preset maps local +Z to world -Z (culet toward camera)', () => {
+    const m = rowMajor(diamondViewRotationColumns('bottom'));
+    const z = mulMatVec(m, [0, 0, 1]);
+    expect(z[0]).toBeCloseTo(0, 6);
+    expect(z[1]).toBeCloseTo(0, 6);
+    expect(z[2]).toBeCloseTo(-1, 6);
+  });
+
+  it('preserves vector length for every preset (orthonormal rotations)', () => {
+    // Pins the matrices as orthonormal — a transcription bug that breaks
+    // unit-length preservation would silently scale the rendered diamond
+    // by the (1 ± ε) factor the bad matrix introduces. Catching it here
+    // also guards against future view additions dropping in a non-rotation.
+    for (const view of ['top', 'side', 'bottom'] as const) {
+      const m = rowMajor(diamondViewRotationColumns(view));
+      const v: [number, number, number] = [3, 4, 12];
+      const r = mulMatVec(m, v);
+      expect(Math.hypot(...r)).toBeCloseTo(Math.hypot(...v), 5);
+    }
+  });
+});
+
 describe('diamond geometry (Tolkowsky ideal)', () => {
   it('girdle radius is 0.5 (half the unit diameter)', () => {
     expect(DIAMOND_INTERNALS.R_GIRDLE).toBeCloseTo(0.5, 10);
@@ -195,6 +235,92 @@ describe('diamond geometry (Tolkowsky ideal)', () => {
     const alpha    = 40.75 * Math.PI / 180;
     const expected = R_GIRDLE * Math.sin(alpha) + 0.01 * Math.cos(alpha);
     expect(planes.pavilion.offset).toBeCloseTo(expected, 8);
+  });
+
+  it('upper half plane passes through BOTH girdle-top rim corners at φ=0 and φ=π/8', () => {
+    // The upper half facet's bottom edge must touch the shared girdle-rim
+    // corners at φ=0 (shared with the neighbour UH across the adjacent
+    // bezel) and φ=π/8 (shared with the neighbour UH across the star — the
+    // UH-UH meeting on the girdle between adjacent bezels). Both corners
+    // must lie exactly on the plane, independent of the tilt angle choice
+    // — this is the invariant that fixes the bezel kite's corner and makes
+    // the star/UH/bezel three-way junction well-defined.
+    //
+    // Catches a regression to the earlier anchor at (R_GIRDLE·cos(π/16),
+    // R_GIRDLE·sin(π/16), H_GIRDLE_HALF), which pushes the plane outside
+    // the girdle circle onto the circumscribing octagon rim — neither
+    // girdle corner then lies on the plane, and the facets stop meeting
+    // at the shared corners.
+    const { R_GIRDLE, H_GIRDLE_HALF, planes } = DIAMOND_INTERNALS;
+    const p = planes.upperHalf;
+
+    const c0 = [R_GIRDLE, 0, H_GIRDLE_HALF] as const;
+    const dot0 = c0[0] * p.nx + c0[1] * p.ny + c0[2] * p.nz;
+    expect(dot0).toBeCloseTo(p.offset, 8);
+
+    const cPi8 = [
+      R_GIRDLE * Math.cos(Math.PI / 8),
+      R_GIRDLE * Math.sin(Math.PI / 8),
+      H_GIRDLE_HALF,
+    ] as const;
+    const dotPi8 = cPi8[0] * p.nx + cPi8[1] * p.ny + cPi8[2] * p.nz;
+    expect(dotPi8).toBeCloseTo(p.offset, 8);
+  });
+
+  it('lower half plane passes through BOTH girdle-bottom rim corners at φ=0 and φ=π/8', () => {
+    // Mirror of the upper half test across z=0 — same invariant: both
+    // shared girdle-rim corners must lie on the plane, independent of
+    // tilt angle. The LH plane's -cos(α) normal component and the
+    // -H_GIRDLE_HALF anchor z cancel into the same offset formula as the
+    // upper half, so the "pass through the φ=0 corner" constraint extends
+    // to φ=π/8 automatically.
+    const { R_GIRDLE, H_GIRDLE_HALF, planes } = DIAMOND_INTERNALS;
+    const p = planes.lowerHalf;
+
+    const c0 = [R_GIRDLE, 0, -H_GIRDLE_HALF] as const;
+    const dot0 = c0[0] * p.nx + c0[1] * p.ny + c0[2] * p.nz;
+    expect(dot0).toBeCloseTo(p.offset, 8);
+
+    const cPi8 = [
+      R_GIRDLE * Math.cos(Math.PI / 8),
+      R_GIRDLE * Math.sin(Math.PI / 8),
+      -H_GIRDLE_HALF,
+    ] as const;
+    const dotPi8 = cPi8[0] * p.nx + cPi8[1] * p.ny + cPi8[2] * p.nz;
+    expect(dotPi8).toBeCloseTo(p.offset, 8);
+  });
+
+  it('upper half tilt stays below 40° so the bezel-star-UH junction fits in the D_8 wedge', () => {
+    // Geometric invariant: at α = 40° the three-way junction of bezel,
+    // star, and upper-half planes lands exactly on the φ=π/8 wedge-mirror
+    // line. At α > 40° the junction escapes into the neighbouring wedge,
+    // the bezel kite stops closing at its corner, and a green bezel sliver
+    // appears between the star and UH facets. The cap is a property of
+    // the current anchor/normal setup (UH anchored on the girdle rim at
+    // φ=0, normal at φ=π/16, with the table-apothem-anchored star); change
+    // any of those and this bound shifts.
+    //
+    // Upper bound only — any α below 35° collapses the apex back to (or
+    // above) the table vertex and the star facet degenerates.
+    const p = DIAMOND_INTERNALS.planes.upperHalf;
+    const alphaRad = Math.acos(p.nz);   // nz = cos(α), α ∈ (0, π/2)
+    const alphaDeg = alphaRad * 180 / Math.PI;
+    expect(alphaDeg).toBeLessThan(40);
+    expect(alphaDeg).toBeGreaterThan(35);
+  });
+
+  it('lower half tilt stays above the pavilion-main angle so LH surfaces instead of hiding inside', () => {
+    // Invariant: if α_LH < α_pavilion, the LH plane lies INSIDE the
+    // pavilion main everywhere below the shared girdle corner and never
+    // becomes the outermost (largest signed distance) plane — the facet
+    // vanishes. The constraint is a one-sided floor: any α between the
+    // pavilion angle and ~50° produces a visible LH; above 50° the facet
+    // just shrinks.
+    const p = DIAMOND_INTERNALS.planes.lowerHalf;
+    const alphaRad = Math.acos(-p.nz);  // nz = -cos(α) for pavilion-side planes
+    const alphaDeg = alphaRad * 180 / Math.PI;
+    expect(alphaDeg).toBeGreaterThan(DIAMOND_INTERNALS.PAVILION_ANGLE_DEG);
+    expect(alphaDeg).toBeLessThan(50);
   });
 
   it('star plane passes through the table-edge midpoint at φ=π/8', () => {

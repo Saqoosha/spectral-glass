@@ -1,6 +1,8 @@
 import { Pane } from 'tweakpane';
 import type { PerfStats } from './perfStats';
-import { DIAMOND_SIZE_MIN, DIAMOND_SIZE_MAX } from './math/diamond';
+import { DIAMOND_SIZE_MIN, DIAMOND_SIZE_MAX, type DiamondView } from './math/diamond';
+
+export type { DiamondView } from './math/diamond';
 
 // Re-exported so persistence.ts can clamp hand-edited storage to the same
 // slider range the UI uses, without importing diamond.ts in two places.
@@ -100,6 +102,18 @@ export type Params = {
   // cross-checked against a real brilliant cut reference. Uses the SDF's
   // plane-difference trick (two planes equidistant = facet boundary).
   diamondWireframe: boolean;
+  // Diamond-only debug overlay: when true, fs_main flat-shades each facet
+  // class with a distinct colour (table=red, bezel=green, star=blue,
+  // upper-half=yellow, girdle=cyan, lower-half=magenta, pavilion=orange)
+  // so per-facet adjacency + coverage are visible without refraction
+  // muddying the signal. Typically paired with refractionStrength=0.
+  diamondFacetColor: boolean;
+  // Diamond-only rotation preset. 'free' tumbles with the spin animation;
+  // fixed views pin to a canonical pose for cross-checking facet geometry
+  // against a reference (top = table toward camera, side = girdle profile,
+  // bottom = culet toward camera). Also bound to the T/S/B/F hotkeys in
+  // main.ts so the user can snap between views without opening the panel.
+  diamondView: DiamondView;
 };
 
 type Preset = {
@@ -298,6 +312,24 @@ export function initUi(
   const diamondWireframeBinding = shape.addBinding(params, 'diamondWireframe', {
     label: 'Wireframe',
   });
+  // Diamond-only: flat-shade by facet class. Pair with Refraction = 0
+  // for a clean colour-coded view of each facet's coverage.
+  const diamondFacetColorBinding = shape.addBinding(params, 'diamondFacetColor', {
+    label: 'Facet color',
+  });
+  // Diamond-only: canonical view presets. 'Free' keeps the tumble; the
+  // three fixed poses pin the shape so facet geometry can be compared
+  // against a reference illustration. T/S/B/F hotkeys bind to the same
+  // param in main.ts — hotkey or dropdown, whichever is faster for the user.
+  const diamondViewBinding = shape.addBinding(params, 'diamondView', {
+    label: 'View',
+    options: {
+      'Free (tumble)': 'free',
+      'Top (table)':   'top',
+      'Side (girdle)': 'side',
+      'Bottom (culet)': 'bottom',
+    },
+  });
 
   // Show the right subset of sliders for each shape. Pill/prism use all three
   // X/Y/Z; cube collapses into a single Size slider (halfSize must stay equal
@@ -321,8 +353,10 @@ export function initUi(
     edgeBinding.hidden       = isDiamond;  // plate uses edgeR as its rim radius; diamond wants sharp facets, no rounding
     waveAmpBinding.hidden    = !isPlate;
     waveLenBinding.hidden    = !isPlate;
-    diamondSizeBinding.hidden      = !isDiamond;
-    diamondWireframeBinding.hidden = !isDiamond;
+    diamondSizeBinding.hidden       = !isDiamond;
+    diamondWireframeBinding.hidden  = !isDiamond;
+    diamondFacetColorBinding.hidden = !isDiamond;
+    diamondViewBinding.hidden       = !isDiamond;
     if (isCube) {
       // Average the three dims to seed Size — covers the case where shape
       // was just switched from pill/prism with non-equal extents.
@@ -480,6 +514,8 @@ export function defaultParams(): Params {
     waveWavelength: 300,
     diamondSize: 200,
     diamondWireframe: false,
+    diamondFacetColor: false,
+    diamondView: 'free',
   };
 }
 

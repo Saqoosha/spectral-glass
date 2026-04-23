@@ -85,13 +85,14 @@ struct Frame {
   // Diamond parameters. `diamondSize` is the girdle diameter in pixels — the
   // sdfDiamond SDF scales all facet offsets by this at eval time so one uniform
   // covers every diamond in the scene (all instances share the size slider).
-  // `diamondWireframe` toggles a facet-edge overlay in the fragment shader
-  // for debugging the cut geometry — 1.0 = on, 0.0 = off. The remaining two
-  // slots are reserved for future diamond controls (e.g., star/crown angle
-  // overrides) and kept zeroed by the host.
+  // `diamondWireframe` toggles the facet-edge overlay (1.0 = on).
+  // `diamondFacetColor` toggles a flat-shaded debug fill where each facet
+  // class gets a distinct colour — useful for checking adjacency + coverage
+  // without refraction / dispersion confusing the signal. The remaining
+  // slot is reserved for future diamond controls (e.g., angle overrides).
   diamondSize:        f32,
   diamondWireframe:   f32,
-  _diamondPad1:       f32,
+  diamondFacetColor:  f32,
   _diamondPad2:       f32,
   pills:              array<PillGpu, MAX_PILLS>,
 };
@@ -1352,14 +1353,23 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
     blend = mix(blend, vec3<f32>(1.0, 0.3, 0.7), 0.2);
   }
 
-  // Diamond facet wireframe overlay — helpful for cross-checking the cut
-  // geometry against a real brilliant-cut reference. Uses the plane-gap
-  // trick from `sdfDiamondEdgeWeight`: the SDF's top two facet distances
-  // are almost equal exactly on a facet boundary. Writes the overlay to
-  // the display-output colour but NOT to the history texture, so the
-  // overlay doesn't accumulate into TAA / history EMA and muddy itself
-  // on subsequent frames.
+  // Diamond debug overlays — helpful for cross-checking the cut geometry
+  // against a real brilliant-cut reference. Both write to the DISPLAY
+  // output only, not the history texture, so they don't accumulate into
+  // TAA / history EMA and muddy themselves on subsequent frames.
+  //
+  //   diamondFacetColor: flat-shade each facet class with a distinct
+  //     colour so adjacency + coverage are visible without refraction
+  //     confusing the signal (disable refraction alongside for the
+  //     cleanest view).
+  //   diamondWireframe:  overlay the facet edges on top. Uses the
+  //     plane-gap trick from `sdfDiamondEdgeWeight` — two plane SDFs
+  //     almost equal → facet boundary.
   var display = blend;
+  if (isDiamond && frame.diamondFacetColor > 0.5) {
+    let pillCenter = frame.pills[analyticIdx].center;
+    display = sdfDiamondFacetColor(h.p - pillCenter, frame.diamondSize);
+  }
   if (isDiamond && frame.diamondWireframe > 0.5) {
     let pillCenter = frame.pills[analyticIdx].center;
     let edgeW      = sdfDiamondEdgeWeight(h.p - pillCenter, frame.diamondSize);

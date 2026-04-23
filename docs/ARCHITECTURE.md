@@ -112,7 +112,8 @@ offset 224 │ plateRotPrev:   mat3x3<f32>                         (48 B)
 offset 272 │ diamondRot:     mat3x3<f32>                         (48 B)
 offset 320 │ diamondRotPrev: mat3x3<f32>                         (48 B)
 offset 368 │ waveAmp, waveFreq, waveLipFactor, sceneTime         (16 B)
-offset 384 │ diamondSize, _pad × 3                               (16 B)
+offset 384 │ diamondSize, diamondWireframe, diamondFacetColor,   (16 B)
+           │   _pad                                              
 offset 400 │ pills[0..8]     each pill is:                       (32 B each)
            │   center.xyz, edgeR,   halfSize.xyz, _pad
 ```
@@ -137,7 +138,16 @@ Uniform size is fixed — pills beyond `pillCount` are zeros.
   computed from the previous frame's `sceneTime` — feed `reprojectHit`
   for TAA motion-vector history reads. When paused they equal the
   current matrices, so the reprojection collapses to identity and history
-  reads land on the pixel centre (no iterated bilinear blur).
+  reads land on the pixel centre (no iterated bilinear blur). For the
+  diamond's fixed view presets, `uniforms.ts` writes the same canonical
+  pose matrix into BOTH `diamondRot` and `diamondRotPrev`, producing a
+  zero motion vector so the frozen shape doesn't smear under TAA.
+- `diamondSize` is the girdle diameter in pixels (slider in `ui.ts`).
+  `diamondWireframe` / `diamondFacetColor` are debug-overlay flags — the
+  first draws facet edges via a top-two-plane-gap smoothstep, the
+  second replaces the refraction result with a flat per-facet colour so
+  coverage + adjacency can be cross-checked without chromatic noise.
+  All three are ignored when `shape != diamond`.
 - `taaEnabled` toggles temporal antialiasing. When on, `fs_main` jitters
   the primary ray by a per-pixel hash within ±0.5 px, and reads history at
   `fragCoord + (projected_prev_world − projected_curr_world)` — jitter
@@ -278,16 +288,36 @@ Five shapes. `sceneSdf` dispatches on the `shape` uniform:
   ratio chosen as coprime small integers (2:3) so the combined orientation
   takes ~63 s to repeat — long enough to read as non-looping in practice;
   see `src/math/plate.ts` for the explicit period derivation).
-- **Diamond** — round brilliant cut as a convex polytope. 58 facets
+- **Diamond** — round brilliant cut as a convex polytope pinned to
+  **Tolkowsky's 1919 "ideal" proportions**: 53 % table (vertex-to-vertex,
+  GIA "bezel point" convention), 34.5° crown, 40.75° pavilion, 22° star,
+  39.9° upper half, 42° lower half, 2 % girdle thickness. 58 facets
   collapse to 7 distance terms via D_8 (octagonal) symmetry folding, then
-  `max(...)` of the half-space distances gives the SDF. Tolkowsky plane
-  coefficients (bezel, star, upper/lower half, pavilion main + table +
-  girdle cylinder) are derived in `src/math/diamond.ts` and injected
-  into the shader as `const` declarations. Rotation is `Rx·Ry` (fixed
-  20° forward tilt + vertical Y-axis spin) precomputed as `diamondRot`
-  on the host — same uniform pattern as cube/plate. SDF code lives in
-  `src/shaders/diamond.wgsl` alongside `hitDiamondPillIdx` and the
-  `diamondProxyVertex` mesh synthesiser.
+  `max(...)` of the half-space distances gives the SDF. The fold reduces
+  the 8-fold azimuthal repeat to a π/8 wedge with 3 mirror reflections
+  (abs on x, abs on y, then reflect across the y = x · tan(π/8) line).
+  Plane coefficients are derived in `src/math/diamond.ts` and injected
+  into the shader as `const` declarations so host math and GPU constants
+  can't drift. The upper-half angle is pinned at 39.9° (not the 42° that
+  physical cut specs usually quote) because with the plane anchored on
+  the actual girdle rim at φ = 0, the bezel-star-UH three-way junction
+  must sit inside the wedge — above 40° it escapes the π/8 mirror and
+  the bezel kite stops closing at its corner; `diamond.test.ts` pins
+  both the corner-passage invariant and the 40° ceiling. Rotation is
+  `Rx·Ry` (fixed 20° forward tilt + vertical Y-axis spin) precomputed
+  as `diamondRot` on the host — same uniform pattern as cube/plate.
+  Four view presets (`free` / `top` / `side` / `bottom`, bound to the
+  `T` / `S` / `B` / `F` hotkeys) swap `diamondRot` with a canonical pose
+  for cross-checking facet geometry against a reference illustration.
+  Two debug overlays — `diamondWireframe` (facet-edge draw via a
+  top-two-plane-gap smoothstep) and `diamondFacetColor` (flat-shade per
+  facet class: table=red, bezel=green, star=blue, upper-half=yellow,
+  girdle=cyan, lower-half=magenta, pavilion=orange) — surface coverage
+  + adjacency without refraction muddying the signal. SDF code lives in
+  `src/shaders/diamond.wgsl` alongside `hitDiamondPillIdx` (TAA
+  reprojection pivot picker) and the `diamondProxyVertex` exact
+  convex-hull proxy mesh (46 triangles: 6-tri table fan + 16-tri crown
+  trapezoids + 16-tri girdle band + 8-tri pavilion cone).
 
 Sphere trace starts from a per-pixel ray origin and direction (see Camera
 above), marches with `HIT_EPS = 0.25` and `MIN_STEP = 0.5`. For pill and
@@ -395,7 +425,7 @@ Apple Silicon.
 
 ## Testing
 
-Math modules are unit-tested (~55 tests, all pass — exact count drifts with
+Math modules are unit-tested (~85 tests, all pass — exact count drifts with
 each new case, see `bun run test`):
 
 - `cauchyIor` at d-line, monotonicity, `V_d` sensitivity, 1.0 clamp.
@@ -406,8 +436,10 @@ each new case, see `bun run test`):
 - `sdfPrism` interior sign, far-field positivity, apex/base edge values, both mirror symmetries, apex narrowing.
 - `sdfCube` interior, far-field, face zero-crossings, symmetry, rounded-corner smoothness.
 - `cameraZForFov` at 60°/90°, monotonicity with FOV, linearity with height, slider bounds.
-- `cubeRotationColumns` identity at t=0, orthonormality, matches the original rz·rx derivation, WGSL padded layout, pad slots zero, rejects non-finite time. `plateRotationColumns` follows the same invariants for its rx·ry composition.
-- `uniform layout drift detector` parses the WGSL `struct Frame` declaration and pins the field set + order (including `plateRot` / `waveAmp` / `waveFreq` / `waveLipFactor`) so anyone editing it gets nudged to update `src/webgpu/uniforms.ts` too.
+- `cubeRotationColumns` identity at t=0, orthonormality, matches the original rz·rx derivation, WGSL padded layout, pad slots zero, rejects non-finite time. `plateRotationColumns` / `diamondRotationColumns` follow the same invariants for their rx·ry and Rx·Ry compositions respectively.
+- Diamond geometry — Tolkowsky-constant sanity (crown / pavilion height ratios, total height 0.55–0.65), facet-plane normals unit-length, bezel/pavilion Y component zero (φ=0 axis), upper+lower half pass through BOTH shared girdle-rim corners at φ=0 and φ=π/8 (catches anchor regression to the circumscribing-octagon rim), UH tilt stays below the 40° wedge-validity ceiling, LH tilt stays above the pavilion angle so it surfaces.
+- Diamond view presets — `top` preserves local +Z as world +Z, `side` rotates local +Z to world +Y, `bottom` rotates it to world -Z; all three preserve vector length (orthonormal).
+- `uniform layout drift detector` parses the WGSL `struct Frame` declaration and pins the field set + order (including `diamondRot` / `diamondRotPrev` / the diamond params slot) so anyone editing it gets nudged to update `src/webgpu/uniforms.ts` too.
 
 WGSL versions are hand-mirrored by the corresponding TS module; the TS tests
 act as the reference. Shader correctness beyond that is verified visually —

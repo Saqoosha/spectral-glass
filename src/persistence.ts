@@ -5,7 +5,7 @@ import {
   PILL_LEN_MAX, PILL_LEN_MIN, PILL_SHORT_MAX, PILL_SHORT_MIN,
   PILL_THICK_MAX, PILL_THICK_MIN,
   WAVE_AMP_MAX, WAVE_AMP_MIN, WAVE_WAVELENGTH_MAX, WAVE_WAVELENGTH_MIN,
-  type AaMode, type Params,
+  type AaMode, type DiamondView, type Params,
 } from './ui';
 import type { Pill } from './pills';
 
@@ -37,6 +37,7 @@ const MODES         = new Set<Params['refractionMode']>(['exact', 'approx']);
 const PROJECTIONS   = new Set<Params['projection']>(['ortho', 'perspective']);
 const SAMPLE_COUNTS = new Set<Params['sampleCount']>([3, 8, 16, 32, 64]);
 const AA_MODES      = new Set<AaMode>(['none', 'fxaa', 'taa']);
+const DIAMOND_VIEWS = new Set<DiamondView>(['free', 'top', 'side', 'bottom']);
 
 function isFiniteNumber(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v);
@@ -86,7 +87,11 @@ function validateParams(u: unknown): Partial<Params> {
   // invert the polytope SDF into a degenerate shape, and a huge value would
   // blow the proxy AABB past the viewport.
   if (isFiniteNumber(p.diamondSize))     out.diamondSize    = clamp(p.diamondSize, DIAMOND_SIZE_MIN, DIAMOND_SIZE_MAX);
-  if (typeof p.diamondWireframe === 'boolean') out.diamondWireframe = p.diamondWireframe;
+  if (typeof p.diamondWireframe === 'boolean')  out.diamondWireframe  = p.diamondWireframe;
+  if (typeof p.diamondFacetColor === 'boolean') out.diamondFacetColor = p.diamondFacetColor;
+  if (typeof p.diamondView === 'string' && DIAMOND_VIEWS.has(p.diamondView as DiamondView)) {
+    out.diamondView = p.diamondView as DiamondView;
+  }
   return out;
 }
 

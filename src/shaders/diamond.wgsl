@@ -144,6 +144,52 @@ fn sdfDiamondEdgeWeight(pIn: vec3<f32>, diameter: f32) -> f32 {
 }
 
 // -----------------------------------------------------------------------------
+// Facet-type flat-shade colour — debug fill
+// -----------------------------------------------------------------------------
+//
+// Returns a distinct flat colour per facet class at a local-space surface
+// point. Used when `frame.diamondFacetColor` is on so the user can see
+// which parts of the SDF surface belong to which facet without refraction
+// muddying the signal. Colours:
+//   table        → red
+//   bezel        → green
+//   star         → blue
+//   upper half   → yellow
+//   girdle       → cyan
+//   lower half   → magenta
+//   pavilion     → orange
+fn sdfDiamondFacetColor(pIn: vec3<f32>, diameter: f32) -> vec3<f32> {
+  let p0 = frame.diamondRot * pIn;
+  var q = abs(p0.xy);
+  if (q.y > q.x) { q = q.yx; }
+  let nRefl = vec2<f32>(-0.3826834324, 0.9238795325);
+  let d     = dot(q, nRefl);
+  if (d > 0.0) { q = q - 2.0 * d * nRefl; }
+  let p = vec3<f32>(q, p0.z);
+  let r = length(q);
+
+  let d_table    = p.z - DIAMOND_H_TOP * diameter;
+  let d_bezel    = dot(p, DIAMOND_BEZEL_N)      - DIAMOND_BEZEL_O      * diameter;
+  let d_star     = dot(p, DIAMOND_STAR_N)       - DIAMOND_STAR_O       * diameter;
+  let d_uhalf    = dot(p, DIAMOND_UPPER_HALF_N) - DIAMOND_UPPER_HALF_O * diameter;
+  let d_girdle   = r                            - DIAMOND_R_GIRDLE     * diameter;
+  let d_lhalf    = dot(p, DIAMOND_LOWER_HALF_N) - DIAMOND_LOWER_HALF_O * diameter;
+  let d_pavmain  = dot(p, DIAMOND_PAVILION_N)   - DIAMOND_PAVILION_O   * diameter;
+
+  let dMax = max(max(max(d_table, d_bezel), max(d_star, d_uhalf)),
+                 max(d_girdle, max(d_lhalf, d_pavmain)));
+
+  // Classify by which plane is the outermost (equal to dMax).
+  if (d_table  >= dMax) { return vec3<f32>(1.0, 0.25, 0.25); }   // red    — table
+  if (d_bezel  >= dMax) { return vec3<f32>(0.25, 1.0, 0.25); }   // green  — bezel
+  if (d_star   >= dMax) { return vec3<f32>(0.25, 0.4, 1.0);  }   // blue   — star
+  if (d_uhalf  >= dMax) { return vec3<f32>(1.0, 0.95, 0.2);  }   // yellow — upper half
+  if (d_girdle >= dMax) { return vec3<f32>(0.25, 1.0, 1.0);  }   // cyan   — girdle
+  if (d_lhalf  >= dMax) { return vec3<f32>(1.0, 0.3, 1.0);   }   // magenta — lower half
+  return                   vec3<f32>(1.0, 0.6, 0.15);            // orange — pavilion main
+}
+
+// -----------------------------------------------------------------------------
 // Pill picker for TAA reprojection
 // -----------------------------------------------------------------------------
 //
