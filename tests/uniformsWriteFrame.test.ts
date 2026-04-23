@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { writeFrame, type FrameParams } from '../src/webgpu/uniforms';
-import { diamondRotationColumns, diamondViewRotationColumns, type DiamondView } from '../src/math/diamond';
+import {
+  DIAMOND_VIEW_VALUES,
+  diamondRotationColumns,
+  diamondViewRotationColumns,
+} from '../src/math/diamond';
 
 // Byte-layout offsets (in floats) mirrored from src/webgpu/uniforms.ts.
 // If the uniforms writer changes its internal layout, these need to move
@@ -138,20 +142,15 @@ describe('writeFrame — diamond rotation slot selection', () => {
     });
   }
 
-  it('persistence allow-list stays in sync with the DiamondView union', async () => {
-    // If someone adds a new view to the DiamondView union without adding
-    // a matrix branch, writeFrame will explode via
-    // diamondViewRotationColumns' fail-fast throw. This test exercises
-    // every CURRENT view to make sure the allow-list and the switch
-    // statement still agree today.
-    const views: DiamondView[] = ['free', 'top', 'side', 'bottom'];
-    for (const view of views) {
+  it('writeFrame accepts every view in DIAMOND_VIEW_VALUES without throwing', () => {
+    // The DiamondView union is derived from DIAMOND_VIEW_VALUES (see
+    // src/math/diamond.ts), so iterating that tuple here gives automatic
+    // sync with the union — adding a new preset makes this loop pick it up
+    // without a test edit. Catches the "forgot to add the matrix branch"
+    // regression via diamondViewRotationColumns' fail-fast throw.
+    for (const view of DIAMOND_VIEW_VALUES) {
       const { device, writes } = mockDevice();
-      // writeFrame only uses buf as an opaque handle passed to queue.writeBuffer.
-    // A stub is sufficient; we don't need the real createFrameBuffer path
-    // (which requires GPUBufferUsage from the WebGPU browser globals, absent
-    // in Node test env).
-    const buf = {} as GPUBuffer;
+      const buf = {} as GPUBuffer;
       expect(() =>
         writeFrame(device, buf, baseParams({ diamondView: view })),
       ).not.toThrow();

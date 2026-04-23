@@ -255,6 +255,14 @@ const DIAMOND_TILT = -20 * DEG;
  *  consistency without being dizzying. */
 const DIAMOND_SPIN_RATE = 0.30;
 
+/** Canonical list of valid DiamondView values, exported as a readonly tuple
+ *  so the runtime allow-list (persistence.ts) and the compile-time union
+ *  below derive from ONE source of truth. Adding a new preset is a single-
+ *  site change: append here and add the matrix branch in
+ *  diamondViewRotationColumns. TypeScript's exhaustive-`never` guard in
+ *  that function will flag the missing branch at compile time. */
+export const DIAMOND_VIEW_VALUES = ['free', 'top', 'side', 'bottom'] as const;
+
 /** Preset view angles for the "click / hotkey to rotate to a canonical
  *  pose" flow. `free` is the default (tumble via `diamondRotationColumns`);
  *  the fixed poses pin the diamond so facet geometry can be cross-checked
@@ -269,7 +277,7 @@ const DIAMOND_SPIN_RATE = 0.30;
  *                 horizontal line across the middle (profile view).
  *                 Implementation: R_x(-π/2).
  *    - `bottom` — culet toward the camera (R_x(π) flip). */
-export type DiamondView = 'free' | 'top' | 'side' | 'bottom';
+export type DiamondView = typeof DIAMOND_VIEW_VALUES[number];
 
 /**
  * Fixed-view rotation matrix columns in the same WGSL-padded 12-float layout
@@ -456,11 +464,10 @@ export function diamondWgslConstants(): string {
 
 // ---------- exports for tests ----------
 
-/** Internal dimensions exposed so tests can cross-check numerics without
- *  re-deriving them. Not used by the render path. */
 /**
  * Internal values exported strictly for regression tests (diamond.test.ts).
  * Not a stable API — fields may appear or disappear as the geometry evolves.
+ * Tests use these so they can cross-check numerics without re-deriving them.
  *
  * `Object.freeze` is applied at both levels so a bad test can't mutate the
  * shared object and poison later tests in the same process. `as const` is

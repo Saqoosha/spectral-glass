@@ -7,6 +7,7 @@ import {
   WAVE_AMP_MAX, WAVE_AMP_MIN, WAVE_WAVELENGTH_MAX, WAVE_WAVELENGTH_MIN,
   type AaMode, type DiamondView, type Params,
 } from './ui';
+import { DIAMOND_VIEW_VALUES } from './math/diamond';
 import type { Pill } from './pills';
 
 const KEY     = 'realrefraction:config';
@@ -37,7 +38,12 @@ const MODES         = new Set<Params['refractionMode']>(['exact', 'approx']);
 const PROJECTIONS   = new Set<Params['projection']>(['ortho', 'perspective']);
 const SAMPLE_COUNTS = new Set<Params['sampleCount']>([3, 8, 16, 32, 64]);
 const AA_MODES      = new Set<AaMode>(['none', 'fxaa', 'taa']);
-const DIAMOND_VIEWS = new Set<DiamondView>(['free', 'top', 'side', 'bottom']);
+// DIAMOND_VIEWS derives from the canonical list in math/diamond.ts, so
+// adding a new preset is a one-site change there — the runtime allow-list
+// and the compile-time union can't drift. The older pattern (hand-written
+// Set literal mirroring a hand-written union) could silently drop
+// newly-added presets on load if someone forgot to update both.
+const DIAMOND_VIEWS = new Set<DiamondView>(DIAMOND_VIEW_VALUES);
 
 function isFiniteNumber(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v);

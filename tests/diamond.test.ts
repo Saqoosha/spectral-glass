@@ -326,18 +326,21 @@ describe('diamond geometry (Tolkowsky ideal)', () => {
     expect(dotPi8).toBeCloseTo(p.offset, 8);
   });
 
-  it('upper half tilt stays below 40° so the bezel-star-UH junction fits in the D_8 wedge', () => {
-    // Geometric invariant: at α = 40° the three-way junction of bezel,
-    // star, and upper-half planes lands exactly on the φ=π/8 wedge-mirror
-    // line. At α > 40° the junction escapes into the neighbouring wedge,
-    // the bezel kite stops closing at its corner, and a green bezel sliver
-    // appears between the star and UH facets. The cap is a property of
-    // the current anchor/normal setup (UH anchored on the girdle rim at
-    // φ=0, normal at φ=π/16, with the table-apothem-anchored star); change
-    // any of those and this bound shifts.
+  it('upper half tilt stays below the 40° wedge-validity ceiling (hard invariant) and above ~35° (aesthetic floor)', () => {
+    // HARD invariant — 40° ceiling: at α = 40° the three-way junction of
+    // bezel, star, and upper-half planes lands exactly on the φ=π/8
+    // wedge-mirror line. At α > 40° the junction escapes into the
+    // neighbouring wedge, the bezel kite stops closing at its corner, and
+    // a green bezel sliver appears between the star and UH facets. The cap
+    // is a property of the current anchor/normal setup (UH anchored on the
+    // girdle rim at φ=0, normal at φ=π/16, with the table-apothem-anchored
+    // star); change any of those and this bound shifts.
     //
-    // Upper bound only — any α below 35° collapses the apex back to (or
-    // above) the table vertex and the star facet degenerates.
+    // SOFT invariant — 35° floor: not a hard geometric failure, just a
+    // visual one. Below ~35° the star apex creeps back toward the table
+    // vertex and the star facet degenerates into a sliver, making the crown
+    // look wrong. The 35° number is aesthetic, not physical — a future
+    // geometry tweak that shifts the star anchor could move it.
     const p = DIAMOND_INTERNALS.planes.upperHalf;
     const alphaRad = Math.acos(p.nz);   // nz = cos(α), α ∈ (0, π/2)
     const alphaDeg = alphaRad * 180 / Math.PI;
