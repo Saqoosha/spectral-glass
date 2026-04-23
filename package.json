@@ -8,7 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "bench:pill": "bun run tools/bench-pill-path.ts"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

@@ -61,6 +61,8 @@ fn adaptiveBlend(prev: vec3<f32>, next: vec3<f32>) -> vec3<f32> {
 // hero-mode shared trace and the per-wavelength loop.
 fn backExit(hitP: vec3<f32>, r1: vec3<f32>, shapeId: i32, pillIdx: u32, internalMax: f32) -> CubeExit {
   let roEntry = hitP + r1 * MIN_STEP;
+  if (shapeId == 0) { return pillAnalyticExit(roEntry, r1, pillIdx); }
+  if (shapeId == 1) { return prismAnalyticExit(roEntry, r1, pillIdx); }
   if (shapeId == 2) { return cubeAnalyticExit(roEntry, r1, pillIdx); }
   if (shapeId == 3) { return plateAnalyticExit(roEntry, r1, pillIdx); }
   // Phase B: diamond uses an analytical polytope exit + short TIR chain (≤3
@@ -138,6 +140,8 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
   // can't early-return from a callee.)
 
   let shapeId   = i32(frame.shape + 0.5);
+  let isPill    = shapeId == 0;
+  let isPrism   = shapeId == 1;
   let isCube    = shapeId == 2;
   let isPlate   = shapeId == 3;
   let isDiamond = shapeId == 4;
@@ -174,7 +178,9 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
   // (that's Phase B) but because `reprojectHit` needs the right pill center
   // to compute motion vectors for multi-instance scenes.
   var analyticIdx: u32 = 0u;
-  if      (isCube)    { analyticIdx = hitCubePillIdx(h.p); }
+  if      (isPill)    { analyticIdx = hitPillPillIdx(h.p); }
+  else if (isPrism)   { analyticIdx = hitPrismPillIdx(h.p); }
+  else if (isCube)    { analyticIdx = hitCubePillIdx(h.p); }
   else if (isPlate)   { analyticIdx = hitPlatePillIdx(h.p); }
   else if (isDiamond) { analyticIdx = hitDiamondPillIdx(h.p); }
 
@@ -183,7 +189,14 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
   // to an arbitrary normal would produce visible-but-wrong refraction
   // colours; routing those pixels through the bg path instead lets them
   // blend cleanly with the silhouette neighbourhood.
-  let nFront = sceneNormal(h.p);
+  var nFront: vec3<f32>;
+  if (isPill) {
+    nFront = sceneNormalPill(h.p, analyticIdx);
+  } else if (isPrism) {
+    nFront = sceneNormalPrism(h.p, analyticIdx);
+  } else {
+    nFront = sceneNormal(h.p);
+  }
   if (dot(nFront, nFront) <= 0.5) {
     var bgFinal = bg;
     if (frame.debugProxy > 0.5) {
@@ -330,9 +343,11 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
   //   2. refract into the glass
   //   3. find the back-face exit point + inward normal (skipped in Approx
   //      mode — reuses sharedExit/sharedNBack):
+  //        pill  → pillAnalyticExit  (AABB slab + sdfPill / sdfPillGrad)
+  //        prism → prismAnalyticExit (AABB slab + sdfPrism / sdfPrismGrad)
   //        cube  → cubeAnalyticExit  (O(1) slab + rounded-box gradient)
   //        plate → plateAnalyticExit (O(1) slab + Newton-refined wavy Z face)
-  //        other → insideTrace + sceneNormal finite differences
+  //        diam. → diamondAnalyticExit
   //   4. refract out
   //   5. sample photo at the exit UV; TIR → reflection color instead
   //   6. PER-WAVELENGTH Fresnel mix between refract and reflect (blue λ has

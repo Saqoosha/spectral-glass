@@ -12,7 +12,7 @@ fn sceneSdf(p: vec3<f32>) -> f32 {
       // is just one mat-vec — the heavy cos/sin used to run per call.
       pd = sdfCube(frame.cubeRot * local, pill.halfSize, pill.edgeR);
     } else if (shapeId == 1) {
-      pd = sdfPrism(local, pill.halfSize, pill.edgeR);
+      pd = sdfPrism(local, pill.halfSize);
     } else if (shapeId == 3) {
       // Plate: wave amp + freq + time come from global uniforms
       // (frame.waveAmp / frame.waveFreq / frame.sceneTime). pill.edgeR is
@@ -92,6 +92,31 @@ fn sceneNormal(p: vec3<f32>) -> vec3<f32> {
     sceneSdf(p + e.yyx) - sceneSdf(p - e.yyx),
   );
   let len2 = dot(g, g);
+  if (len2 < 1e-8) {
+    return vec3<f32>(0.0);
+  }
+  return g * inverseSqrt(len2);
+}
+
+// Front normal for prism (shapeId==1): single `sdfPrism` / `sdfPrismGrad`.
+fn sceneNormalPrism(p: vec3<f32>, pillIdx: u32) -> vec3<f32> {
+  let pill  = frame.pills[pillIdx];
+  let local = p - pill.center;
+  let g     = sdfPrismGrad(local, pill.halfSize);
+  let len2  = dot(g, g);
+  if (len2 < 1e-8) {
+    return vec3<f32>(0.0);
+  }
+  return g * inverseSqrt(len2);
+}
+
+// Front normal for the pill shape (shapeId==0) using one instance's sdfPill
+// only — `sceneNormal` would run 6× `sceneSdf` = 6× pillCount SDFs per eval.
+fn sceneNormalPill(p: vec3<f32>, pillIdx: u32) -> vec3<f32> {
+  let pill  = frame.pills[pillIdx];
+  let local = p - pill.center;
+  let g     = sdfPillGrad(local, pill.halfSize, pill.edgeR);
+  let len2  = dot(g, g);
   if (len2 < 1e-8) {
     return vec3<f32>(0.0);
   }

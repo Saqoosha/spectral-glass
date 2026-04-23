@@ -29,6 +29,13 @@ export type CommonBodyParams = {
   edgeR:               number;
 };
 
+/** Triangular prism: sharp edges only (no rim rounding) — `edgeR` is not used. */
+export type PrismBodyParams = {
+  pillLen:   number;
+  pillShort: number;
+  pillThick: number;
+};
+
 export type PlateShapeParams = CommonBodyParams & {
   waveAmp:         number;
   waveWavelength:  number;
@@ -45,7 +52,7 @@ export type DiamondShapeParams = {
 
 export type ShapesParams = {
   pill:    CommonBodyParams;
-  prism:   CommonBodyParams;
+  prism:   PrismBodyParams;
   cube:    CommonBodyParams;
   plate:   PlateShapeParams;
   diamond: DiamondShapeParams;
@@ -72,7 +79,7 @@ const DEF_DIAMOND: DiamondShapeParams = {
 export function defaultShapesParams(): ShapesParams {
   return {
     pill:    { ...DEF_BODY },
-    prism:   { ...DEF_BODY, pillLen: 400, pillShort: 80, pillThick: 80, edgeR: 4 },
+    prism:   { pillLen: 400, pillShort: 80, pillThick: 80 },
     cube:    { ...DEF_BODY, pillLen: 300, pillShort: 300, pillThick: 300, edgeR: 30 },
     plate:   { ...DEF_PLATE, pillLen: 400, pillThick: 100, edgeR: 4 },
     diamond: { ...DEF_DIAMOND },
@@ -133,7 +140,20 @@ export function frameFieldsFromParams(params: {
       diamondView:          shapes.diamond.diamondView,
     };
   }
-  const b  = shapes[shape] as CommonBodyParams;
+  if (shape === 'prism') {
+    const p = shapes.prism;
+    return {
+      n_d, V_d, refractionStrength,
+      pillLen: p.pillLen, pillShort: p.pillShort, pillThick: p.pillThick, edgeR: 0,
+      waveAmp:        shapes.plate.waveAmp,
+      waveWavelength: shapes.plate.waveWavelength,
+      diamondSize:          shapes.diamond.diamondSize,
+      diamondWireframe:     shapes.diamond.diamondWireframe, diamondFacetColor: shapes.diamond.diamondFacetColor,
+      diamondTirDebug:      shapes.diamond.diamondTirDebug, diamondTirMaxBounces: shapes.diamond.diamondTirMaxBounces,
+      diamondView:          shapes.diamond.diamondView,
+    };
+  }
+  const b  = shape === 'pill' ? shapes.pill : shapes.cube;
   return {
     n_d, V_d, refractionStrength,
     pillLen: b.pillLen, pillShort: b.pillShort, pillThick: b.pillThick, edgeR: b.edgeR,
@@ -168,7 +188,7 @@ export function shapesFromLegacyFlat(p: Record<string, unknown>, defaults: Shape
   )));
   return {
     pill:  { ...defaults.pill, ...body },
-    prism: { ...defaults.prism, ...body },
+    prism: { ...defaults.prism, pillLen: pl, pillShort: ps, pillThick: pt },
     cube:  { ...defaults.cube, ...body },
     plate: { ...defaults.plate, ...body, waveAmp: wa, waveWavelength: ww },
     diamond: {
@@ -196,6 +216,16 @@ function mergeBody(o: unknown, d: CommonBodyParams): CommonBodyParams {
     pillShort: isFiniteNumber(r.pillShort) ? clampF(r.pillShort as number, PILL_SHORT_MIN, PILL_SHORT_MAX) : d.pillShort,
     pillThick: isFiniteNumber(r.pillThick) ? clampF(r.pillThick as number, PILL_THICK_MIN, PILL_THICK_MAX) : d.pillThick,
     edgeR:     isFiniteNumber(r.edgeR)     ? clampF(r.edgeR as number,     EDGE_R_MIN,     EDGE_R_MAX)     : d.edgeR,
+  };
+}
+
+export function mergePrismDims(d: PrismBodyParams, o: unknown): PrismBodyParams {
+  if (o === null || typeof o !== 'object' || Array.isArray(o)) return { ...d };
+  const r = o as Record<string, unknown>;
+  return {
+    pillLen:   isFiniteNumber(r.pillLen)   ? clampF(r.pillLen as number,   PILL_LEN_MIN,   PILL_LEN_MAX)   : d.pillLen,
+    pillShort: isFiniteNumber(r.pillShort) ? clampF(r.pillShort as number, PILL_SHORT_MIN, PILL_SHORT_MAX) : d.pillShort,
+    pillThick: isFiniteNumber(r.pillThick) ? clampF(r.pillThick as number, PILL_THICK_MIN, PILL_THICK_MAX) : d.pillThick,
   };
 }
 
@@ -237,7 +267,7 @@ export function loadShapesFromStorage(shapes: unknown, legacyRoot: Record<string
   const d0 = defaultShapesParams();
   return {
     pill:    mergeBody(s.pill,    d0.pill),
-    prism:   mergeBody(s.prism,   d0.prism),
+    prism:   mergePrismDims(d0.prism, s.prism),
     cube:    mergeBody(s.cube,    d0.cube),
     plate:   mergePlate(s.plate,  d0.plate),
     diamond: mergeDiamond(s.diamond, d0.diamond),

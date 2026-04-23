@@ -2,19 +2,15 @@ type Vec3 = readonly [number, number, number];
 
 /**
  * Triangular prism SDF. Isosceles triangle cross-section in the YZ plane
- * (apex at +Z, base at -Z), extruded along X with rounded 3D edges.
+ * (apex at +Z, base at -Z), extruded along X. Sharp edges (no fillet) —
+ * matches `sdfPrism` in `dispersion/sdf_primitives.wgsl`.
  *
  * halfSize semantics match `sdfPill3d`:
- *   halfSize.x = extrusion length  (long axis of the visible top-down silhouette)
+ *   halfSize.x = extrusion length
  *   halfSize.y = triangle base half-width
- *   halfSize.z = triangle apex height (top face edge)
- *
- * Designed for top-down orthographic viewing: the slanted YZ faces bend rays
- * laterally, producing the classic prism rainbow. Mirrored in
- * `dispersion.wgsl`.
+ *   halfSize.z = triangle apex height
  */
-export function sdfPrism(p: Vec3, halfSize: Vec3, edgeR: number): number {
-  const hX = halfSize[0];
+export function sdfPrism(p: Vec3, halfSize: Vec3): number {
   const hY = halfSize[1];
   const hZ = halfSize[2];
 
@@ -25,9 +21,9 @@ export function sdfPrism(p: Vec3, halfSize: Vec3, edgeR: number): number {
   const dBase  = -hZ - qz;
   const d2     = Math.max(dSlant, dBase);
 
-  const dX = Math.abs(p[0]) - hX;
+  const dX = Math.abs(p[0]) - halfSize[0];
   const wx = d2;
   const wy = dX;
   return Math.hypot(Math.max(wx, 0), Math.max(wy, 0))
-       + Math.min(Math.max(wx, wy), 0) - edgeR;
+       + Math.min(Math.max(wx, wy), 0);
 }

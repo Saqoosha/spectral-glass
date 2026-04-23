@@ -1,10 +1,10 @@
 // ---------- proxy vertex shader ----------
 //
 // Draws a per-pill 3D AABB (unit cube scaled to `halfSize`, optionally rotated
-// for shape==cube). Rounded SDFs (`sdfPill` / `sdfCube` / `sdfPrism`) already
-// fold `edgeR` into the distance field; their outer axis-aligned extent is
-// `halfSize`, so adding `edgeR` here **again** was an over-estimate and made
-// the proxy (and "Show proxy" debug) much larger than the real silhouette.
+// for shape==cube). `sdfPill` / `sdfCube` fold rim radius into the field;
+// their outer extent is `halfSize` (no extra proxy pad). The prism SDF is
+// sharp and fits the same AABB, so the cube proxy is tight. Adding `edgeR`
+// here was wrong for prisms and is no longer used in their SDF.
 
 // Unit cube, 36 verts (= CUBE_PROXY_VERT_COUNT from src/math/diamond.ts),
 // 12 tris, CCW outward winding (so `cullMode: 'back'` leaves one invocation

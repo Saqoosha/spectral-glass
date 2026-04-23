@@ -33,8 +33,8 @@ fn insideTrace(ro: vec3<f32>, rd: vec3<f32>, maxT: f32) -> vec3<f32> {
 // Which cube pill does a world-space point belong to? Used once per fragment
 // after the front hit to pick the pill whose analytical back-face intersection
 // we'll evaluate in the wavelength loop. Only meaningful when the front hit is
-// itself on a cube; the call site gates this with `isCube` so the result is
-// untouched in pill/prism mode.
+// itself on a cube; the call site gates this with `isCube`. (Pill / prism use
+// `hitPillPillIdx` / `hitPrismPillIdx` instead.)
 //
 // Uses per-pill rotated-cube SDF (same expression as sceneSdf's cube branch),
 // then ranks by ABSOLUTE distance to the surface so that:
@@ -62,6 +62,129 @@ fn hitCubePillIdx(p: vec3<f32>) -> u32 {
     if (d < bestD) { bestD = d; best = i; }
   }
   return best;
+}
+
+// Which pill does the front hit belong to? Same distance logic as
+// `hitCubePillIdx`, but the surface SDF is `sdfPill` (stadium) not `sdfCube`.
+fn hitPillPillIdx(p: vec3<f32>) -> u32 {
+  let count = min(u32(frame.pillCount), MAX_PILLS);
+  var best:  u32 = 0u;
+  var bestD: f32 = 1e9;
+  for (var i: u32 = 0u; i < count; i = i + 1u) {
+    let pill  = frame.pills[i];
+    let local = p - pill.center;
+    let d     = abs(sdfPill(local, pill.halfSize, pill.edgeR));
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  return best;
+}
+
+// Which prism instance owns the front hit? Same pattern as `hitPillPillIdx`.
+fn hitPrismPillIdx(p: vec3<f32>) -> u32 {
+  let count = min(u32(frame.pillCount), MAX_PILLS);
+  var best:  u32 = 0u;
+  var bestD: f32 = 1e9;
+  for (var i: u32 = 0u; i < count; i = i + 1u) {
+    let pill  = frame.pills[i];
+    let local = p - pill.center;
+    let d     = abs(sdfPrism(local, pill.halfSize));
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  return best;
+}
+
+// Analytical back-face exit for axis-aligned `sdfPill` (no world rotation).
+// Same AABB slab + Newton refinement idea as `cubeAnalyticExit`, but the
+// SDF/gradient are `sdfPill` / `sdfPillGrad` instead of rounded-box.
+fn pillAnalyticExit(roWorld: vec3<f32>, rdWorld: vec3<f32>, pillIdx: u32) -> CubeExit {
+  let pill = frame.pills[pillIdx];
+  let h    = pill.halfSize;
+  let roL  = roWorld - pill.center;
+  let rdL  = rdWorld;
+  let rdInv = vec3<f32>(1.0) / rdL;
+  let tHi   = (h - roL) * rdInv;
+  let tLo   = (-h - roL) * rdInv;
+  let tExitAxis = max(tHi, tLo);
+  var tExit: f32;
+  var faceAxisN: vec3<f32>;
+  if (tExitAxis.x <= tExitAxis.y && tExitAxis.x <= tExitAxis.z) {
+    tExit = tExitAxis.x;
+    let faceDir = select(-1.0, 1.0, tHi.x >= tLo.x);
+    faceAxisN = vec3<f32>(faceDir, 0.0, 0.0);
+  } else if (tExitAxis.y <= tExitAxis.z) {
+    tExit = tExitAxis.y;
+    let faceDir = select(-1.0, 1.0, tHi.y >= tLo.y);
+    faceAxisN = vec3<f32>(0.0, faceDir, 0.0);
+  } else {
+    tExit = tExitAxis.z;
+    let faceDir = select(-1.0, 1.0, tHi.z >= tLo.z);
+    faceAxisN = vec3<f32>(0.0, 0.0, faceDir);
+  }
+  var pL = roL + rdL * tExit;
+  for (var i: i32 = 0; i < 4; i = i + 1) {
+    let d = sdfPill(pL, h, pill.edgeR);
+    if (abs(d) < HIT_EPS * 0.1) { break; }
+    let n = sdfPillGrad(pL, h, pill.edgeR);
+    let nLen2 = dot(n, n);
+    if (nLen2 < 1e-8) { break; }
+    pL = pL - n * d * inverseSqrt(nLen2);
+  }
+  let nG = sdfPillGrad(pL, h, pill.edgeR);
+  let nL2 = dot(nG, nG);
+  var nOutL: vec3<f32>;
+  if (nL2 > 1e-8) {
+    nOutL = nG * inverseSqrt(nL2);
+  } else {
+    nOutL = faceAxisN;
+  }
+  let pWorld = pL + pill.center;
+  return CubeExit(pWorld, -nOutL);
+}
+
+// Analytical back-face for sharp `sdfPrism` (axis-aligned, no fillet).
+fn prismAnalyticExit(roWorld: vec3<f32>, rdWorld: vec3<f32>, pillIdx: u32) -> CubeExit {
+  let pill = frame.pills[pillIdx];
+  let h    = pill.halfSize;
+  let roL  = roWorld - pill.center;
+  let rdL  = rdWorld;
+  let rdInv = vec3<f32>(1.0) / rdL;
+  let tHi   = (h - roL) * rdInv;
+  let tLo   = (-h - roL) * rdInv;
+  let tExitAxis = max(tHi, tLo);
+  var tExit: f32;
+  var faceAxisN: vec3<f32>;
+  if (tExitAxis.x <= tExitAxis.y && tExitAxis.x <= tExitAxis.z) {
+    tExit = tExitAxis.x;
+    let faceDir = select(-1.0, 1.0, tHi.x >= tLo.x);
+    faceAxisN = vec3<f32>(faceDir, 0.0, 0.0);
+  } else if (tExitAxis.y <= tExitAxis.z) {
+    tExit = tExitAxis.y;
+    let faceDir = select(-1.0, 1.0, tHi.y >= tLo.y);
+    faceAxisN = vec3<f32>(0.0, faceDir, 0.0);
+  } else {
+    tExit = tExitAxis.z;
+    let faceDir = select(-1.0, 1.0, tHi.z >= tLo.z);
+    faceAxisN = vec3<f32>(0.0, 0.0, faceDir);
+  }
+  var pL = roL + rdL * tExit;
+  for (var i: i32 = 0; i < 4; i = i + 1) {
+    let d = sdfPrism(pL, h);
+    if (abs(d) < HIT_EPS * 0.1) { break; }
+    let n = sdfPrismGrad(pL, h);
+    let nLen2 = dot(n, n);
+    if (nLen2 < 1e-8) { break; }
+    pL = pL - n * d * inverseSqrt(nLen2);
+  }
+  let nG = sdfPrismGrad(pL, h);
+  let nL2 = dot(nG, nG);
+  var nOutL: vec3<f32>;
+  if (nL2 > 1e-8) {
+    nOutL = nG * inverseSqrt(nL2);
+  } else {
+    nOutL = faceAxisN;
+  }
+  let pWorld = pL + pill.center;
+  return CubeExit(pWorld, -nOutL);
 }
 
 // Analytical back-face intersection for a rotated rounded cube. Given a ray

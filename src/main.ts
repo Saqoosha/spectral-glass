@@ -380,6 +380,7 @@ async function main(): Promise<void> {
       // actual silhouette. edgeR stays at 0 for diamond — the shape uses
       // raw intersection-of-half-spaces without rounding.
       const isPlate   = params.shape === 'plate';
+      const isPrism   = params.shape === 'prism';
       const isDiamond = params.shape === 'diamond';
       for (const pill of pills) {
         if (isDiamond) {
@@ -400,7 +401,8 @@ async function main(): Promise<void> {
           pill.hx    = uf.pillLen   / 2;
           pill.hy    = isPlate ? pill.hx : uf.pillShort / 2;
           pill.hz    = uf.pillThick / 2;
-          pill.edgeR = Math.min(uf.edgeR, pill.hx, pill.hy, pill.hz);
+          // Prism: sharp isosceles solid — GPU uses `sdfPrism` with no fillet; keep 0.
+          pill.edgeR = isPrism ? 0 : Math.min(uf.edgeR, pill.hx, pill.hy, pill.hz);
         }
       }
       // Paused-frame accounting for progressive averaging (see declaration

@@ -9,6 +9,18 @@ fn sdfPill(p: vec3<f32>, halfSize: vec3<f32>, edgeR: f32) -> f32 {
   return length(max(w, vec2<f32>(0.0))) + min(max(w.x, w.y), 0.0) - edgeR;
 }
 
+// Unnormalised ∇(sdfPill) via central differences — for Newton refinement and
+// single-pill surface normals (avoids scanning all instances in `sceneSdf`).
+fn sdfPillGrad(p: vec3<f32>, halfSize: vec3<f32>, edgeR: f32) -> vec3<f32> {
+  let e = HIT_EPS;
+  let s = 0.5 / e;
+  return vec3<f32>(
+    (sdfPill(p + vec3<f32>(e, 0.0, 0.0), halfSize, edgeR) - sdfPill(p - vec3<f32>(e, 0.0, 0.0), halfSize, edgeR)) * s,
+    (sdfPill(p + vec3<f32>(0.0, e, 0.0), halfSize, edgeR) - sdfPill(p - vec3<f32>(0.0, e, 0.0), halfSize, edgeR)) * s,
+    (sdfPill(p + vec3<f32>(0.0, 0.0, e), halfSize, edgeR) - sdfPill(p - vec3<f32>(0.0, 0.0, e), halfSize, edgeR)) * s,
+  );
+}
+
 // Rounded box / cuboid. Equal halfSize = cube.
 fn sdfCube(p: vec3<f32>, halfSize: vec3<f32>, edgeR: f32) -> f32 {
   let q = abs(p) - halfSize + vec3<f32>(edgeR);
@@ -17,8 +29,9 @@ fn sdfCube(p: vec3<f32>, halfSize: vec3<f32>, edgeR: f32) -> f32 {
 
 // Isosceles triangle in YZ (apex +Z, base -Z), extruded along X. Half-sizes
 // match sdfPill: halfSize.x is extrusion length, halfSize.y the triangle base
-// half-width, halfSize.z the apex height.
-fn sdfPrism(p: vec3<f32>, halfSize: vec3<f32>, edgeR: f32) -> f32 {
+// half-width, halfSize.z the apex height. Sharp edges (no rim radius) so the
+// proxy AABB `±halfSize` tightly bounds the solid.
+fn sdfPrism(p: vec3<f32>, halfSize: vec3<f32>) -> f32 {
   let hY = halfSize.y;
   let hZ = halfSize.z;
   let qy = abs(p.y);
@@ -30,7 +43,17 @@ fn sdfPrism(p: vec3<f32>, halfSize: vec3<f32>, edgeR: f32) -> f32 {
 
   let dX = abs(p.x) - halfSize.x;
   let w  = vec2<f32>(d2, dX);
-  return length(max(w, vec2<f32>(0.0))) + min(max(w.x, w.y), 0.0) - edgeR;
+  return length(max(w, vec2<f32>(0.0))) + min(max(w.x, w.y), 0.0);
+}
+
+fn sdfPrismGrad(p: vec3<f32>, halfSize: vec3<f32>) -> vec3<f32> {
+  let e = HIT_EPS;
+  let s = 0.5 / e;
+  return vec3<f32>(
+    (sdfPrism(p + vec3<f32>(e, 0.0, 0.0), halfSize) - sdfPrism(p - vec3<f32>(e, 0.0, 0.0), halfSize)) * s,
+    (sdfPrism(p + vec3<f32>(0.0, e, 0.0), halfSize) - sdfPrism(p - vec3<f32>(0.0, e, 0.0), halfSize)) * s,
+    (sdfPrism(p + vec3<f32>(0.0, 0.0, e), halfSize) - sdfPrism(p - vec3<f32>(0.0, 0.0, e), halfSize)) * s,
+  );
 }
 
 // Diamond (round brilliant cut) SDF + proxy-mesh helpers live in a separate

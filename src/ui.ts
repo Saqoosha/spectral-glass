@@ -2,8 +2,8 @@ import { Pane } from 'tweakpane';
 import type { PerfStats } from './perfStats';
 import { DIAMOND_SIZE_MIN, DIAMOND_SIZE_MAX, type DiamondView } from './math/diamond';
 import { ENVMAPS, DEFAULT_ENVMAP_SLUG, DEFAULT_ENVMAP_SIZE, ENVMAP_SIZES, type EnvmapSize } from './envmapList';
-import { defaultShapesParams, type ShapesParams } from './shapeParams';
-export type { ShapesParams, CommonBodyParams, PlateShapeParams, DiamondShapeParams } from './shapeParams';
+import { defaultShapesParams, mergePrismDims, type ShapesParams } from './shapeParams';
+export type { ShapesParams, CommonBodyParams, PlateShapeParams, DiamondShapeParams, PrismBodyParams } from './shapeParams';
 
 /** Bounds for the envmap exposure slider. Exposed so `persistence.ts`
  *  clamps hand-edited / stale localStorage to the exact same range —
@@ -254,7 +254,7 @@ const PRESETS: readonly Preset[] = [
       p.n_d   = 1.6;
       p.V_d   = 12;
       p.refractionStrength = 0.18;
-      Object.assign(p.shapes.prism, { pillLen: 400, pillShort: 80, pillThick: 80, edgeR: 4 });
+      Object.assign(p.shapes.prism, { pillLen: 400, pillShort: 80, pillThick: 80 });
       p.refractionMode = 'exact';
     },
   },
@@ -338,7 +338,6 @@ export function initUi(
   inspPrism.addBinding(params.shapes.prism, 'pillLen',   { min: PILL_LEN_MIN,   max: PILL_LEN_MAX,   step: 1, label: 'Length (X)' });
   inspPrism.addBinding(params.shapes.prism, 'pillShort', { min: PILL_SHORT_MIN, max: PILL_SHORT_MAX, step: 1, label: 'Short (Y)'  });
   inspPrism.addBinding(params.shapes.prism, 'pillThick', { min: PILL_THICK_MIN, max: PILL_THICK_MAX, step: 1, label: 'Thick (Z)'  });
-  inspPrism.addBinding(params.shapes.prism, 'edgeR',     { min: EDGE_R_MIN, max: EDGE_R_MAX, step: 0.5, label: 'Edge radius' });
 
   const inspCube = shape.addFolder({ title: 'Cube (rotating)', expanded: true });
   const cubeSize = { value: params.shapes.cube.pillLen };
@@ -654,7 +653,7 @@ export function mergeParams(base: Params, patch: Partial<Params>): Params {
   const shapes = s
     ? {
         pill:    { ...base.shapes.pill,    ...s.pill },
-        prism:   { ...base.shapes.prism,   ...s.prism },
+        prism:   mergePrismDims(base.shapes.prism, s.prism),
         cube:    { ...base.shapes.cube,    ...s.cube },
         plate:   { ...base.shapes.plate,   ...s.plate },
         diamond: { ...base.shapes.diamond, ...s.diamond },
