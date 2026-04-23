@@ -91,12 +91,28 @@ struct Frame {
   // without refraction / dispersion confusing the signal.
   // `diamondTirDebug` (1.0 = on): paint the TIR-exhausted bounce fallback
   // HOT PINK so "where does the analytical exit run out of refract
-  // candidates after two internal bounces?" is visible at a glance. When
-  // off, that path falls back to `bg` and blends with the silhouette.
+  // candidates after two internal bounces?" is visible at a glance.
+  // When off, the exhausted-chain path blends with silhouette `bg`
+  // (envmap disabled) or with envmap-at-front-reflection (envmap
+  // enabled) — see the "Three ways to fall back" branch in fs_main's
+  // wavelength loop.
   diamondSize:        f32,
   diamondWireframe:   f32,
   diamondFacetColor:  f32,
   diamondTirDebug:    f32,
+  // HDR environment map parameters (Phase C).
+  // `envmapExposure`: linear-light multiplier on the sampled panorama.
+  // Most HDRIs have peaks in the 100-1000 range; 0.25 keeps them
+  // visible without washing out the Fresnel mix.
+  // `envmapRotation`: radians, rotate the sky around world-Y. Lets the
+  // user "move the sun" without re-downloading.
+  // `envmapEnabled`: 1.0 = use envmap for reflection/TIR paths, 0.0 =
+  // keep the Phase A `reflSrc` fallback for A/B comparison and as a
+  // graceful degrade while a new envmap is still fetching.
+  envmapExposure:     f32,
+  envmapRotation:     f32,
+  envmapEnabled:      f32,
+  _envmapPad:         f32,
   pills:              array<PillGpu, MAX_PILLS>,
 };
 
@@ -105,6 +121,62 @@ struct Frame {
 @group(0) @binding(2) var photoSmp: sampler;
 @group(0) @binding(3) var historyTex: texture_2d<f32>;
 @group(0) @binding(4) var historySmp: sampler;
+// HDR environment panorama (Phase C). rgba16float, equirectangular
+// projection: U spans longitude ±π (repeat), V spans latitude from +π/2
+// at the top to -π/2 at the bottom (clamp). Sampled by `sampleEnvmap()`
+// below for reflection/TIR paths so diamond facets reflect a real sky
+// /room instead of a UV-shifted photo hack.
+@group(0) @binding(5) var envmapTex: texture_2d<f32>;
+@group(0) @binding(6) var envmapSmp: sampler;
+
+// Sample the equirectangular envmap in a given WORLD-space direction.
+// Convention:
+//   - WORLD +Y points VISUALLY DOWN on screen (DOM-top-origin world;
+//     see pipeline.ts's `frontFace:'cw'` comment — NDC-up maps to
+//     world-down). So a ray going world -Y is going visually UP toward
+//     the HDRI's zenith, and we sample the panorama's top row (V=0)
+//     there. The sign convention is baked into the V formula below.
+//   - Longitude 0 at world +Z (toward camera), wraps ±π as you sweep
+//     around Y — matches Poly Haven's canonical orientation so users
+//     who've seen an HDRI in another tool see the same sun position.
+//   - `envmapRotation` (radians) rotates the sky around Y, giving the
+//     user a "turn the sun" knob without re-downloading a different
+//     HDRI.
+//   - `envmapExposure` multiplies linear-light intensity. HDRIs can
+//     be 100×+ brighter than 1.0; the default 0.25 keeps typical peaks
+//     visible without blowing out the rest of the image.
+fn sampleEnvmap(dir: vec3<f32>) -> vec3<f32> {
+  // Defend against zero / near-zero direction vectors. The refraction
+  // call sites hand in `mix(rd, r2, strength)` which collapses to ~0
+  // when r2 ≈ -rd at strength ≈ 0.5 (can happen on glancing-angle
+  // refractions at diamond pavilion/crown rims). WGSL's normalize is
+  // undefined for zero-length input — typically NaN, which then
+  // poisons atan2 / asin / textureSampleLevel and re-introduces the
+  // exact "black dots along bright edges" symptom the fp16 clamp in
+  // envmap.ts was added to eliminate. Return the panorama's zenith as
+  // a finite, "roughly upward" fallback — the ray was trying to look
+  // somewhere ambiguous and any coherent direction beats NaN.
+  let lenSq = dot(dir, dir);
+  if (!(lenSq > 1.0e-8)) {
+    return textureSampleLevel(envmapTex, envmapSmp, vec2<f32>(0.5, 0.0), 0.0).rgb
+         * frame.envmapExposure;
+  }
+  let d = dir * inverseSqrt(lenSq);
+  let twoPi = 6.28318530717958647693;
+  let lon = atan2(d.x, d.z) + frame.envmapRotation;
+  let u   = lon / twoPi + 0.5;
+  // Map world-Y to HDRI-V with the sign that puts the zenith at V=0.
+  // Since world +Y is visually down:
+  //   d.y = -1 (ray pointing up)   → V = 0 (top of panorama = sky)
+  //   d.y = +1 (ray pointing down) → V = 1 (bottom = ground)
+  // The `+ asin(...)` (rather than `- asin(...)`) gets this mapping in
+  // one go. A sign flip here inverts the HDRI upside-down on the
+  // reflecting surface — the "gray region fed by upward rays" symptom
+  // that the Phase C review caught.
+  let v   = 0.5 + asin(clamp(d.y, -1.0, 1.0)) / 3.14159265358979323846;
+  let raw = textureSampleLevel(envmapTex, envmapSmp, vec2<f32>(u, v), 0.0).rgb;
+  return raw * frame.envmapExposure;
+}
 
 // ---------- coords ----------
 
@@ -930,7 +1002,25 @@ struct FsOut {
 @fragment
 fn fs_bg(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
   let uv    = fragCoord.xy / frame.resolution;
-  let bg    = textureSampleLevel(photoTex, photoSmp, coverUv(uv), 0.0).rgb;
+  // Match fs_main's bg source: envmap when enabled (unified scene),
+  // Picsum photo otherwise. Rebuild the per-pixel view ray matching
+  // fs_main's construction — MINUS the sub-pixel TAA jitter. fs_bg is
+  // a single fullscreen pass with no per-sample accumulation, so
+  // jitter would just add temporal noise to the sky without aiding
+  // convergence; the proxy fragments that DO need jitter sit inside
+  // the silhouette and are shaded by fs_main instead. The small
+  // sub-pixel offset at the silhouette edge is invisible because the
+  // proxy pass overwrites those pixels anyway.
+  let bgPhoto = textureSampleLevel(photoTex, photoSmp, coverUv(uv), 0.0).rgb;
+  var rdBg: vec3<f32>;
+  if (frame.projection > 0.5) {
+    let roP = vec3<f32>(frame.resolution * 0.5, frame.cameraZ);
+    rdBg = normalize(vec3<f32>(fragCoord.xy, 0.0) - roP);
+  } else {
+    rdBg = vec3<f32>(0.0, 0.0, -1.0);
+  }
+  let bgEnv = sampleEnvmap(rdBg);
+  let bg    = select(bgPhoto, bgEnv, frame.envmapEnabled > 0.5);
   let prev  = textureSampleLevel(historyTex, historySmp, uv, 0.0).rgb;
   let blend = mix(prev, bg, frame.historyBlend);
   var o: FsOut;
@@ -1016,7 +1106,16 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
   // further than the camera-to-far-plane distance in the scene.
   let maxT = 2.0 * max(frame.cameraZ, 400.0) + 400.0;
   let h    = sphereTrace(ro, rd, maxT);
-  let bg   = textureSampleLevel(photoTex, photoSmp, coverUv(uv), 0.0).rgb;
+  // Background source: when envmap is enabled, sample the HDR panorama
+  // in the VIEW direction (rd) so bg, reflection, AND refraction all
+  // read from the same unified environment — the scene reads as a
+  // diamond floating in a real studio/outdoor space instead of a
+  // diamond pasted on top of an unrelated Picsum photo. Legacy photo
+  // sampling path preserved for A/B comparison and for when the user
+  // disables envmap entirely.
+  let bgPhoto  = textureSampleLevel(photoTex, photoSmp, coverUv(uv), 0.0).rgb;
+  let bgEnv    = sampleEnvmap(rd);
+  let bg       = select(bgPhoto, bgEnv, frame.envmapEnabled > 0.5);
 
   // Helper for the "render as background" path — used for miss, for hits
   // whose front normal came out degenerate, and for the no-data fallback at
@@ -1138,12 +1237,27 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
   // plate facing straight at the camera (visible as a slightly shrunk
   // bg inside the glass). `(refl - rd).xy` / `(r2 - rd).xy` isolate the
   // optical bend itself; refraction strength now scales only the bend.
-  let refl       = reflect(rd, nFront);
+  let refl = reflect(rd, nFront);
+  // Two source strategies for the reflection colour:
+  //   Phase A legacy: sample the BACKGROUND photo at a UV offset along
+  //     the reflection vector. Cheap, looks "reflective" at first glance,
+  //     but physically wrong — the reflection should depend on the
+  //     ENVIRONMENT direction, not on a shifted view of the thing BEHIND
+  //     the glass. Produces the "same photo slightly shifted" artefact
+  //     that looks like mis-refraction at glancing angles.
+  //   Phase C envmap: sample a linear HDR panorama at the reflection
+  //     direction. Real reflections of a real environment; drives the
+  //     Fresnel highlight with bright sky/studio-light HDR peaks which
+  //     is what makes diamonds actually sparkle.
+  // Gate by `frame.envmapEnabled` so a user can toggle between the two
+  // for A/B comparison and so the startup frame (before the real HDRI
+  // arrives) falls back gracefully to the legacy path.
   let reflUv     = uv + (refl - rd).xy * 0.2;
   let reflCover  = coverUv(reflUv);
   let reflInBnds = all(reflCover >= vec2<f32>(0.0)) && all(reflCover <= vec2<f32>(1.0));
   let reflRaw    = textureSampleLevel(photoTex, photoSmp, reflCover, 0.0).rgb;
-  let reflSrc    = select(bg, reflRaw, reflInBnds) * vec3<f32>(0.85, 0.9, 1.0);
+  let reflLegacy = select(bg, reflRaw, reflInBnds) * vec3<f32>(0.85, 0.9, 1.0);
+  let reflSrc    = select(reflLegacy, sampleEnvmap(refl), frame.envmapEnabled > 0.5);
 
   // Front-face cosine (angle of incidence). Identical for every wavelength at
   // the front face, so compute once.
@@ -1324,34 +1438,60 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> FsOut {
           curP     = exN.pWorld;
         }
         if (resolved) {
-          // UV shift uses (outDir - rd) on the same parallax approximation
-          // as the non-bounced path; the spatial shift between the chained
-          // exit points is negligible at the diamond's pixel scale vs the
-          // photo's assumed distance behind the plane.
+          // Envmap enabled → sample the panorama directly at the
+          // outgoing ray direction. `strength` continues to blend
+          // between "no refraction" (rd, same as bg) and "full
+          // refraction" (outDir) so the UI slider keeps meaning.
+          // Photo path: classic UV offset — parallax approximation
+          // assuming the photo sits at a fixed distance behind.
           let uvOffB    = uv + (outDir - rd).xy * strength;
           let uvCoverB  = coverUv(uvOffB);
           let inBoundsB = all(uvCoverB >= vec2<f32>(0.0)) && all(uvCoverB <= vec2<f32>(1.0));
-          refractL = select(
+          let refractPhoto = select(
             bg,
             textureSampleLevel(photoTex, photoSmp, uvCoverB, photoLod).rgb,
             inBoundsB,
           );
+          let refractEnv = sampleEnvmap(mix(rd, outDir, strength));
+          refractL = select(refractPhoto, refractEnv, frame.envmapEnabled > 0.5);
         } else {
-          // Exhausted bounce chain. Production: blend with silhouette
-          // (`bg`). Debug toggle: hot pink marker so the user can see
-          // exactly where the N-bounce chain still TIRs (drives the
-          // "do we need a 3rd bounce?" investigation).
-          refractL = select(bg, vec3<f32>(1.0, 0.2, 0.75), frame.diamondTirDebug > 0.5);
+          // Exhausted bounce chain. Three ways to fall back:
+          //   1. `diamondTirDebug` on → hot pink marker so the user sees
+          //      exactly where the chain still TIRs (drives the "do we
+          //      need a 3rd bounce?" investigation).
+          //   2. Envmap enabled → sample reflSrc, which at this point
+          //      is the envmap-at-front-reflection. The ray bounced
+          //      around and would eventually exit as external
+          //      reflection of the environment; reflSrc approximates
+          //      that without paying another analytical exit.
+          //   3. Neither → blend with silhouette (`bg`, the Phase B
+          //      no-envmap fallback).
+          let exhaustedFallback = select(bg, reflSrc, frame.envmapEnabled > 0.5);
+          refractL = select(exhaustedFallback, vec3<f32>(1.0, 0.2, 0.75), frame.diamondTirDebug > 0.5);
         }
       } else {
-        // Non-diamond shapes keep the Phase A fallback. Refactoring their
-        // TIR paths is Phase C territory.
+        // Non-diamond shapes (and diamond in approx mode) skip the
+        // 2-bounce analytical chain — the chain needs the per-facet
+        // normal that only the Phase B diamond analytical exit can
+        // produce cheaply. Their TIR still benefits from the envmap
+        // indirectly: `reflSrc` resolves to `sampleEnvmap(refl)` when
+        // envmap is enabled, so cube/plate/approx-mode-diamond TIR
+        // samples the real environment instead of the legacy Phase A
+        // UV-offset photo hack. Upgrading them to their own bounce
+        // chain would need analytical cube/plate TIR facet picking —
+        // Phase D territory.
         refractL = reflSrc;
       }
     } else if (r2NaN || r2OOB) {
       refractL = bg;
     } else {
-      refractL = textureSampleLevel(photoTex, photoSmp, uvCover, photoLod).rgb;
+      // Successful refract. Envmap: sample the panorama at the
+      // refracted direction; strength interpolates between rd (bg
+      // direction = no refraction visible) and r2 (full refraction).
+      // Photo: classic UV-offset sample.
+      let refractPhoto = textureSampleLevel(photoTex, photoSmp, uvCover, photoLod).rgb;
+      let refractEnv   = sampleEnvmap(mix(rd, r2, strength));
+      refractL = select(refractPhoto, refractEnv, frame.envmapEnabled > 0.5);
     }
 
     // Per-wavelength Schlick Fresnel: short λ (blue) has higher IOR → higher F.

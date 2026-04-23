@@ -64,7 +64,7 @@ Requires a WebGPU-capable browser (Chrome / Edge 120+, Safari 18+).
 | **Space** | Shuffle pills to random positions |
 | **`R`** | Reload a new random Picsum photo |
 | **`T` / `S` / `B` / `F`** | Diamond view presets — **T**op (table toward camera) / **S**ide (girdle profile) / **B**ottom (culet toward camera) / **F**ree (tumble). No-op for other shapes. |
-| Tweakpane | IOR, Abbe, sample count, shape (pill / prism / cube / plate / diamond), dimensions, wave amp + wavelength (plate only), **diamond size** + view preset + **Wireframe** / **Facet color** debug overlays (diamond only), refraction strength, projection (ortho / perspective), FOV, temporal jitter, refraction mode, **Stop the world** (freeze rotation/wave while AA keeps converging), **AA** mode selector — `None` / `FXAA` (single-frame spatial filter) / `TAA` (sub-pixel jitter + motion-vector history reprojection) |
+| Tweakpane | IOR, Abbe, sample count, shape (pill / prism / cube / plate / diamond), dimensions, wave amp + wavelength (plate only), **diamond size** + view preset + **Wireframe** / **Facet color** debug overlays (diamond only), refraction strength, projection (ortho / perspective), FOV, temporal jitter, refraction mode, **Stop the world** (freeze rotation/wave while AA keeps converging), **AA** mode selector — `None` / `FXAA` (single-frame spatial filter) / `TAA` (sub-pixel jitter + motion-vector history reprojection), **Environment** panel — HDR panorama picker (curated Poly Haven HDRIs spanning studio / indoor / outdoor / sunset / night categories, selectable at 1K / 2K / 4K resolution — 2K default), exposure + rotation sliders, Random panorama button, Enabled toggle to A/B with the legacy reflSrc hack |
 | Presets | Subtle pill · Strong dispersion · Prism rainbow · Rotating cube · Wavy plate |
 | Materials | 10 real-world glasses (water → BK7 → SF flints → diamond → moissanite) + 4 fantasy (n_d up to 3.5, V_d down to 2) |
 
@@ -132,6 +132,19 @@ every proxy fragment pink and see the rasterised silhouette.
   wavelength blend back into the silhouette. Approx mode sticks with the
   shared hero-wavelength reflSrc fallback to avoid frame-to-frame flicker
   from hero-jitter-driven bounce-path changes.
+- **HDR environment map (unified scene).** Background, refraction, AND
+  reflection all sample a real linear-HDR panorama (Poly Haven CC0
+  HDRIs, curated across studio / indoor / outdoor / sunset / night
+  categories at 1K / 2K / 4K resolution — 2K default).
+  bg samples at the view direction (skybox-style in perspective,
+  flat in ortho); refracted rays sample at their exit direction
+  (classic IBL refraction, avoids the UV-parallax approximation);
+  reflections at the reflection direction. Bright HDR highlights
+  drive the Fresnel rim — top-view diamonds show the characteristic
+  "light gathered + returned through the crown" sparkle that a flat
+  photo can't produce. Toggleable for A/B with the legacy Picsum
+  photo bg + UV-offset refraction path; exposure + yaw sliders let
+  users tune without re-downloading.
 - **Temporal accumulation.** `rgba16float` ping-pong history with EMA blend
   (α = 0.2 steady-state, 1.0 for one frame after a scene change so cube
   tail doesn't ghost in). When **Stop the world** freezes the scene, the
@@ -188,6 +201,9 @@ src/
 │   │                           tumble + fixed-view rotation matrices
 │   └── diamondExit.ts          JS mirror of the analytical ray-polytope
 │                               back-exit (Phase B regression reference)
+├── hdr.ts                      Minimal Radiance .hdr decoder (Phase C)
+├── envmap.ts                   HDR envmap texture loader + GPU uploader
+├── envmapList.ts               Curated Poly Haven HDRI slugs + random picker
 ├── persistence.ts              localStorage: validated load, debounced save, pagehide flush
 ├── photo.ts                    Picsum fetch → GPU texture (w/ gradient fallback)
 ├── pills.ts                    Pill state + shape-aware pointer drag
@@ -262,3 +278,23 @@ Tech demo / proof of technique. Not a library. No production website
 integration. If you want to pull the spectral-refraction technique into your
 own project, the interesting files are `src/shaders/dispersion.wgsl` and the
 six math modules in `src/math/`.
+
+## Credits
+
+HDR environment maps are sourced on demand from [Poly Haven][1] and
+individually authored by their contributing photographers (primarily
+Greg Zaal, Dimitrios Savva, Sergej Majboroda, et al.). All Poly Haven
+HDRIs are released under [CC0][2] — no attribution required for use,
+but listed here in gratitude. Consider [supporting Poly Haven][3] if
+you use a lot of their bandwidth.
+
+Picsum background photos are fetched from [picsum.photos][4] under
+the [Unsplash license][5].
+
+Project code itself is [MIT-licensed](LICENSE).
+
+[1]: https://polyhaven.com/hdris
+[2]: https://creativecommons.org/public-domain/cc0/
+[3]: https://www.polyhaven.com/support
+[4]: https://picsum.photos/
+[5]: https://unsplash.com/license

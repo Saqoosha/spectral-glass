@@ -12,7 +12,8 @@ refraction shader only runs on fragments the proxy actually covers.
 │                                                                      │
 │  1. resize canvas + history + post-intermediate if needed            │
 │  2. push params → pills (hx/hy/hz/edgeR)                             │
-│  3. writeFrame → uniform buffer (656 B: scalars + 6×mat3 + pills)    │
+│  3. writeFrame → uniform buffer (672 B: scalars + 6×mat3 + plate    │
+│     + diamond + envmap 16B blocks + pills)                          │
 │  4. scene pass (writes → intermediate(rgba16f) + history[write]):    │
 │     a. bg sub-pass: fullscreen triangle → fs_bg (photo + history)    │
 │     b. proxy sub-pass: instanced 3D proxy mesh → fs_main             │
@@ -90,6 +91,8 @@ fragment shader's rays will trace.
 | `src/ui.ts` | Tweakpane bindings for `Params`. |
 | `src/main.ts` | Wires everything, runs the RAF loop inside a `try/catch`, owns reload-race protection via `photoRevision`. |
 | `src/math/{cauchy,wyman,srgb,sdfPill,sdfPrism,sdfCube,camera,cube,plate,diamond,diamondExit}.ts` | Pure functions mirrored by the WGSL of the same name. The vitest suite is the reference. `cube.ts` / `plate.ts` / `diamond.ts` precompute the tumble rotations (rz·rx for cube, rx·ry for plate, Rx·Ry for diamond) on the host so the shader avoids per-SDF-eval cos/sin. `diamond.ts` also generates a WGSL `const` block containing its Tolkowsky-derived facet plane coefficients AND the unfolded normal arrays the analytical exit iterates over — single source of truth. `diamondExit.ts` mirrors the ray-polytope analytical exit so its behaviour can be pinned by a vitest regression without GPU access. |
+| `src/hdr.ts` | Radiance .hdr (RGBE) decoder + round-trip encoder. Pure JS, no GPU dependency — tested via synthetic encode→decode round-trips. Supports the adaptive-RLE format Poly Haven ships (width 8-32767); legacy per-pixel RLE throws with a clear message. |
+| `src/envmap.ts`, `src/envmapList.ts` | HDR environment panorama loader. `envmap.ts` fetches from a URL, decodes via `hdr.ts`, converts RGB float → RGBA half-float (with an `F16_MAX_FINITE = 65504` clamp to stop bright HDR pixels from overflowing into +Inf and seeding NaN through the linear sampler), uploads to an rgba16f texture for linear-filtered IBL sampling. `envmapList.ts` curates Poly Haven CC0 HDRIs across studio / indoor / outdoor / sunset / night categories at 1K / 2K / 4K resolution and exposes a `pickRandomSlug` helper for the UI Random button. |
 | `src/shaders/dispersion.wgsl` | Trace/SDF framework: sphere-trace, sceneSdf dispatch, Cauchy, CIE, Fresnel, spectral accumulation, TIR fallback (with a 2-bounce chain for diamond in exact mode), `cubeAnalyticExit` + `plateAnalyticExit` + `backExit` dispatcher, proxy vertex + fragment shaders. Writes linear RGB to `@location(0)` — sRGB encoding now lives in postprocess.wgsl. |
 | `src/shaders/diamond.wgsl` | Diamond-specific geometry: sdfDiamond, `diamondAnalyticExit` (ray-polytope back-exit used by both the standard exit path and the 2-bounce TIR chain), hitDiamondPillIdx (TAA reprojection pivot picker), diamondProxyVertex (exact convex-hull proxy mesh). Concatenated after dispersion.wgsl at pipeline build time so diamond-only work stays isolated in one file. |
 | `src/shaders/postprocess.wgsl` | Passthrough + FXAA fragment shaders. FXAA runs in perceptual (sRGB) luma for edge detection and blends color in linear space. Applies the sRGB OETF when the swapchain is non-sRGB. |
@@ -113,13 +116,16 @@ offset 272 │ diamondRot:     mat3x3<f32>                         (48 B)
 offset 320 │ diamondRotPrev: mat3x3<f32>                         (48 B)
 offset 368 │ waveAmp, waveFreq, waveLipFactor, sceneTime         (16 B)
 offset 384 │ diamondSize, diamondWireframe, diamondFacetColor,   (16 B)
-           │   _pad                                              
-offset 400 │ pills[0..8]     each pill is:                       (32 B each)
+           │   diamondTirDebug
+offset 400 │ envmapExposure, envmapRotation, envmapEnabled,      (16 B)
+           │   _pad
+offset 416 │ pills[0..8]     each pill is:                       (32 B each)
            │   center.xyz, edgeR,   halfSize.xyz, _pad
 ```
 
-Total 656 bytes (80 B head + 6 × 48 B rotation matrices + 16 B plate
-wave/scene-time block + 16 B diamond params block + 8 × 32 B pills).
+Total 672 bytes (80 B head + 6 × 48 B rotation matrices + 16 B plate
+wave/scene-time block + 16 B diamond params block + 16 B envmap params
+block + 8 × 32 B pills).
 Uniform size is fixed — pills beyond `pillCount` are zeros.
 
 - `shape` selects the SDF (0=pill, 1=prism, 2=cube, 3=plate, 4=diamond).

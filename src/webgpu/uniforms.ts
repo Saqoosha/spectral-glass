@@ -30,8 +30,11 @@ export type FrameParams = {
   readonly diamondSize:        number;  // diamond: girdle diameter (px). Ignored for other shapes.
   readonly diamondWireframe:   boolean; // diamond: overlay facet edges on top of the rendering for debugging.
   readonly diamondFacetColor:  boolean; // diamond: flat-shade each facet class with a distinct debug colour.
-  readonly diamondTirDebug:    boolean; // diamond: paint hot pink where the 2-bounce TIR chain exhausts (vs blending with bg).
+  readonly diamondTirDebug:    boolean; // diamond: paint hot pink where the 2-bounce TIR chain exhausts (vs the production fallback — bg when envmap off, envmap-at-front-reflection when envmap on).
   readonly diamondView:        DiamondView; // diamond: 'free' tumbles, fixed views pin for reference-checking.
+  readonly envmapEnabled:      boolean; // Phase C: use HDR panorama for reflection / TIR (false = Phase A reflSrc hack).
+  readonly envmapExposure:     number;  // linear-light multiplier on envmap samples. Typical 0.05–1.0 depending on HDRI peak.
+  readonly envmapRotation:     number;  // radians around world-Y; rotates the sky panorama.
   readonly pills:              readonly Pill[];
 };
 
@@ -48,8 +51,9 @@ export type FrameParams = {
 //   offset 272: diamondRot     mat3x3<f32>                        (48 B)
 //   offset 320: diamondRotPrev mat3x3<f32>                        (48 B)
 //   offset 368: waveAmp, waveFreq, waveLipFactor, sceneTime       (16 B)
-//   offset 384: diamondSize + 3 pad                               (16 B)
-//   offset 400: pills[0..MAX_PILLS] — each pill is vec3 + f32 + vec3 + f32 (32 B)
+//   offset 384: diamondSize + 3 diamond bool-flags                (16 B)
+//   offset 400: envmapExposure, envmapRotation, envmapEnabled, pad (16 B)
+//   offset 416: pills[0..MAX_PILLS] — each pill is vec3 + f32 + vec3 + f32 (32 B)
 const HEAD_FLOATS              = 20;                                // 80 B
 const CUBE_ROT_FLOATS          = 12;                                // 48 B (3 padded cols)
 const CUBE_ROT_PREV_FLOATS     = 12;                                // 48 B (prev-frame cube for reprojection)
@@ -58,18 +62,20 @@ const PLATE_ROT_PREV_FLOATS    = 12;                                // 48 B (pre
 const DIAMOND_ROT_FLOATS       = 12;                                // 48 B
 const DIAMOND_ROT_PREV_FLOATS  = 12;                                // 48 B (prev-frame diamond for reprojection)
 const PLATE_PARAMS_FLOATS      = 4;                                 // 16 B (3 used + 1 pad)
-const DIAMOND_PARAMS_FLOATS    = 4;                                 // 16 B (diamondSize + 3 pad)
+const DIAMOND_PARAMS_FLOATS    = 4;                                 // 16 B (size + 3 bool-flags)
+const ENVMAP_PARAMS_FLOATS     = 4;                                 // 16 B (exposure + rotation + enabled + pad)
 const PILL_FLOATS              = 8;                                 // 32 B per pill
 const TOTAL_FLOATS    = HEAD_FLOATS
                        + CUBE_ROT_FLOATS    + CUBE_ROT_PREV_FLOATS
                        + PLATE_ROT_FLOATS   + PLATE_ROT_PREV_FLOATS
                        + DIAMOND_ROT_FLOATS + DIAMOND_ROT_PREV_FLOATS
-                       + PLATE_PARAMS_FLOATS + DIAMOND_PARAMS_FLOATS
+                       + PLATE_PARAMS_FLOATS + DIAMOND_PARAMS_FLOATS + ENVMAP_PARAMS_FLOATS
                        + PILL_FLOATS * MAX_PILLS;
 const TOTAL_BYTES     = TOTAL_FLOATS * 4;
 
 // Reused across frames so we don't allocate a fresh Float32Array every tick.
-// Total size grows with the field set — see TOTAL_BYTES above (currently 656 B).
+// Total size grows with the field set — see TOTAL_BYTES above (currently 672 B
+// after Phase C added the envmap 16-B params block).
 const scratch = new Float32Array(TOTAL_FLOATS);
 
 export function createFrameBuffer(device: GPUDevice): GPUBuffer {
@@ -154,16 +160,29 @@ export function writeFrame(device: GPUDevice, buf: GPUBuffer, p: FrameParams): v
   scratch[plateParamsBase + 2] = 1 / Math.sqrt(1 + ampFreq * ampFreq);
   scratch[plateParamsBase + 3] = p.sceneTime;
 
-  // Diamond params: girdle diameter + debug wireframe flag. The surrounding
-  // 16-B block keeps the pills array at its natural 16-byte alignment so
-  // WGSL's array-of-struct layout rules hold without per-element padding.
+  // Diamond params: girdle diameter + 3 debug flags (wireframe,
+  // facetColor, tirDebug). The surrounding 16-B block keeps the
+  // envmap block (and pills array after it) at their natural 16-byte
+  // alignment so WGSL's array-of-struct layout rules hold without
+  // per-element padding.
   const diamondParamsBase = plateParamsBase + PLATE_PARAMS_FLOATS;
   scratch[diamondParamsBase + 0] = p.diamondSize;
   scratch[diamondParamsBase + 1] = p.diamondWireframe  ? 1 : 0;
   scratch[diamondParamsBase + 2] = p.diamondFacetColor ? 1 : 0;
   scratch[diamondParamsBase + 3] = p.diamondTirDebug   ? 1 : 0;
 
-  const pillBase  = diamondParamsBase + DIAMOND_PARAMS_FLOATS;
+  // Envmap params. `envmapEnabled` is a boolean-as-f32 so the shader's
+  // `frame.envmapEnabled > 0.5` guard matches the other diamond debug
+  // flags' convention.
+  const envmapParamsBase = diamondParamsBase + DIAMOND_PARAMS_FLOATS;
+  scratch[envmapParamsBase + 0] = p.envmapExposure;
+  scratch[envmapParamsBase + 1] = p.envmapRotation;
+  scratch[envmapParamsBase + 2] = p.envmapEnabled ? 1 : 0;
+  // slot 3 is the alignment pad left at scratch.fill(0)'s zero — reserved
+  // for a future envmap control (IBL mip bias, tint, etc.) without
+  // another layout bump.
+
+  const pillBase  = envmapParamsBase + ENVMAP_PARAMS_FLOATS;
   const pillCount = Math.min(p.pills.length, MAX_PILLS);
   for (let i = 0; i < pillCount; i++) {
     const pill = p.pills[i]!;

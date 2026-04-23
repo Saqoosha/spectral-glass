@@ -3,6 +3,8 @@ import { createPipeline, encodeScene, rebuildBindGroups } from './webgpu/pipelin
 import { createFrameBuffer, writeFrame } from './webgpu/uniforms';
 import { createPerf } from './webgpu/perf';
 import { loadPhoto, destroyPhoto } from './photo';
+import { loadEnvmap, createDefaultEnvmap, destroyEnvmap, type EnvmapTex } from './envmap';
+import { DEFAULT_ENVMAP_SLUG, envmapUrl, isKnownSlug, pickRandomSlug } from './envmapList';
 import { attachDrag, defaultPills, type Pill } from './pills';
 import { defaultParams, initUi, mergeParams, type Params } from './ui';
 import { cameraZForFov } from './math/camera';
@@ -65,10 +67,15 @@ async function main(): Promise<void> {
 
   const frameBuf = createFrameBuffer(ctx.device);
   let photoNow   = await loadPhoto(ctx.device);
+  // Default envmap is a synthetic sky/horizon gradient — ships without
+  // network cost so pipeline creation is offline. The real HDRI is
+  // fetched asynchronously after createPipeline returns; bind groups
+  // rebuild on arrival.
+  let envmapNow: EnvmapTex = createDefaultEnvmap(ctx.device);
 
   const initSize = resizeCanvas(ctx.canvas, ctx.dpr);
   let history    = createHistory(ctx.device, initSize.width, initSize.height);
-  const pl       = await createPipeline(ctx, frameBuf, photoNow, history);
+  const pl       = await createPipeline(ctx, frameBuf, photoNow, envmapNow, history);
   const post     = await createPostProcess(ctx, initSize.width, initSize.height);
 
   const stored = loadStored();
@@ -109,7 +116,7 @@ async function main(): Promise<void> {
       if (rev !== photoRevision) { destroyPhoto(next); return; }
       const old = photoNow;
       photoNow = next;
-      rebuildBindGroups(ctx, pl, frameBuf, photoNow, history);
+      rebuildBindGroups(ctx, pl, frameBuf, photoNow, envmapNow, history);
       markSceneChanged();
       // Hold off the destroy until pending GPU work referencing `old` has drained.
       ctx.device.queue.onSubmittedWorkDone()
@@ -120,15 +127,115 @@ async function main(): Promise<void> {
       showNotice(`Photo reload failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
+  // Envmap reload follows the same race-guarded pattern as photo.
+  // Failed fetch leaves the current envmap in place; notifies the UI so
+  // the user knows their click didn't land. `isBoot` extends the
+  // notice duration when the very first panorama fetch fails: the
+  // synthetic gradient fallback looks plausibly-outdoorsy and would
+  // otherwise hide the failure (user concludes "rendering looks
+  // bland" rather than "my network blocked the CDN"), so a longer
+  // on-screen message makes the failure mode discoverable.
+  let envmapRevision = 0;
+  // Tracks whether the REAL HDRI has ever loaded this session — lets
+  // the `onEnvmapEnabled` UI hook know whether a lazy fetch is needed
+  // when the user flips envmap on after it was off at boot. Flips on
+  // the first SUCCESSFUL reload (not on failed fetch), so a failed
+  // initial attempt still lets the lazy path retry later.
+  let envmapRealLoaded = false;
+  const reloadEnvmap = async (slug: string, isBoot = false): Promise<void> => {
+    const rev = ++envmapRevision;
+    try {
+      const next = await loadEnvmap(ctx.device, envmapUrl(slug, params.envmapSize));
+      if (rev !== envmapRevision) { destroyEnvmap(next); return; }
+      const old = envmapNow;
+      envmapNow = next;
+      envmapRealLoaded = true;
+      params.envmapSlug = slug;
+      rebuildBindGroups(ctx, pl, frameBuf, photoNow, envmapNow, history);
+      markSceneChanged();
+      persist();
+      ctx.device.queue.onSubmittedWorkDone()
+        .then(() => destroyEnvmap(old))
+        // Narrow catch: ONLY covers the cleanup path. Device-lost
+        // scenarios are surfaced separately via the `device.lost`
+        // handler in `src/webgpu/device.ts`, which calls `showFatal`
+        // and prompts a reload. If that fatal wasn't wired, the
+        // old-texture leak here would still be preferable to tearing
+        // down app state on every transient hiccup.
+        .catch((err) => console.error('[envmap] queue drain failed, skipping destroy:', err));
+    } catch (err) {
+      console.error('[envmap] reload failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      // Boot-time failure: extend the notice to 12 s and include
+      // "using fallback gradient" so the user understands the on-
+      // screen rendering is the default, not the requested HDRI.
+      if (isBoot) {
+        showNotice(`Envmap fetch failed — using fallback gradient. ${msg}`, 12_000);
+      } else {
+        showNotice(`Envmap fetch failed: ${msg}`);
+      }
+    }
+  };
   // Live perf stats — written by the render loop, read by the UI panel via
   // tweakpane monitor bindings (no manual refresh needed).
   const perfStats = createPerfStats();
   const tickFrameTimer = makeFrameTimer(perfStats);
 
-  const pane = initUi(params, () => { void reloadPhoto(); }, persist, markSceneChanged, {
-    stats:        perfStats,
-    hasGpuTiming: ctx.hasTimestamp,
-  });
+  // Forward-declared so the `randomEnvmap` closure can refresh the pane
+  // AFTER it's created. Tweakpane's one-way data flow (params → UI)
+  // needs a manual refresh() when we mutate params from the outside.
+  let paneRef: ReturnType<typeof initUi> | null = null;
+  const randomEnvmap = () => {
+    const next = pickRandomSlug(params.envmapSlug);
+    // Set the slug synchronously BEFORE refresh. `reloadEnvmap` only
+    // writes `params.envmapSlug = slug` after its async fetch resolves,
+    // so a pre-fetch refresh would read the OLD slug and leave the
+    // dropdown stuck on the previous panorama. Updating here keeps the
+    // UI and the pending fetch in sync even if the fetch later fails
+    // (the user sees what they asked for; the notice explains the
+    // failure separately).
+    params.envmapSlug = next;
+    void reloadEnvmap(next);
+    paneRef?.refresh();
+  };
+  const pane = initUi(
+    params,
+    () => { void reloadPhoto(); },
+    persist,
+    markSceneChanged,
+    { stats: perfStats, hasGpuTiming: ctx.hasTimestamp },
+    (slug) => { void reloadEnvmap(slug); },
+    randomEnvmap,
+    () => {
+      // Enabled toggled to true. Fetch the stored slug now if we
+      // haven't already loaded a real HDRI this session. The
+      // `envmapRealLoaded` flag lives inside `reloadEnvmap`'s
+      // closure and flips on the first successful fetch.
+      if (!envmapRealLoaded) void reloadEnvmap(params.envmapSlug);
+    },
+  );
+  paneRef = pane;
+
+  // Kick off the initial HDR panorama fetch. Pipeline already has the
+  // default gradient envmap bound, so the first few frames render fine
+  // (just the gradient) until the real HDRI arrives. If the slug is
+  // unknown (e.g. we added the allow-list after a user's localStorage
+  // stored something stale), fall back to the bundled default.
+  const bootSlug = isKnownSlug(params.envmapSlug) ? params.envmapSlug : DEFAULT_ENVMAP_SLUG;
+  // Skip the initial HDRI download when envmap is disabled — it's a
+  // 2K file (~5-10 MB) on every page load, and the user-visible
+  // rendering uses the Phase A photo-based fallback in that mode.
+  // When the user later toggles Enabled from false → true, the
+  // `envmapEnabled` binding fires a lazy fetch (see ui.ts) so the
+  // HDRI only downloads when it's actually going to be sampled.
+  if (params.envmapEnabled) {
+    void reloadEnvmap(bootSlug, /* isBoot */ true);
+  } else {
+    // Still pin the slug to a known value so the lazy fetch on enable
+    // uses a working URL even if localStorage had a stale / unknown
+    // slug when the page opened.
+    params.envmapSlug = bootSlug;
+  }
 
   // Flush any pending debounced save on page hide so a drag-then-close doesn't
   // lose the last drag position.
@@ -248,7 +355,7 @@ async function main(): Promise<void> {
       const resized = resizeHistory(ctx.device, history, width, height);
       if (resized !== history) {
         history = resized;
-        rebuildBindGroups(ctx, pl, frameBuf, photoNow, history);
+        rebuildBindGroups(ctx, pl, frameBuf, photoNow, envmapNow, history);
       }
       resizeIntermediate(ctx.device, post, width, height);
 
@@ -377,6 +484,12 @@ async function main(): Promise<void> {
         diamondFacetColor:  params.diamondFacetColor,
         diamondTirDebug:    params.diamondTirDebug,
         diamondView:        params.diamondView,
+        // Envmap controls forward to the shader as-is; slug itself is
+        // not a uniform (the texture IS the envmap — slug lives in UI
+        // state only).
+        envmapEnabled:      params.envmapEnabled,
+        envmapExposure:     params.envmapExposure,
+        envmapRotation:     params.envmapRotation,
         pills,
       });
 

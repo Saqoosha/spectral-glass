@@ -1,6 +1,20 @@
 import { Pane } from 'tweakpane';
 import type { PerfStats } from './perfStats';
 import { DIAMOND_SIZE_MIN, DIAMOND_SIZE_MAX, type DiamondView } from './math/diamond';
+import { ENVMAPS, DEFAULT_ENVMAP_SLUG, DEFAULT_ENVMAP_SIZE, ENVMAP_SIZES, type EnvmapSize } from './envmapList';
+
+/** Bounds for the envmap exposure slider. Exposed so `persistence.ts`
+ *  clamps hand-edited / stale localStorage to the exact same range —
+ *  mirrors the `PILL_LEN_MIN/MAX` / `DIAMOND_SIZE_MIN/MAX` pattern used
+ *  for every other user-tunable range. */
+export const ENVMAP_EXPOSURE_MIN = 0.01;
+export const ENVMAP_EXPOSURE_MAX = 2.0;
+/** Yaw rotation around world-Y in radians. Full turn wraps naturally
+ *  via the sampler's `repeat` addressing mode, but the slider and
+ *  persistence clamp to [-π, π] so the UI always shows a canonical
+ *  representative. */
+export const ENVMAP_ROTATION_MIN = -Math.PI;
+export const ENVMAP_ROTATION_MAX =  Math.PI;
 
 export type { DiamondView } from './math/diamond';
 
@@ -122,6 +136,28 @@ export type Params = {
   // bottom = culet toward camera). Also bound to the T/S/B/F hotkeys in
   // main.ts so the user can snap between views without opening the panel.
   diamondView: DiamondView;
+  // HDR environment map controls (Phase C). Replace the Phase A
+  // reflSrc hack (background-photo-at-UV-offset) with a proper
+  // environment panorama so reflections sample a REAL sky/studio
+  // rather than a shifted view of the thing behind the glass.
+  envmapEnabled: boolean;
+  // Linear-light multiplier on envmap samples. HDR peaks can be
+  // 100×+, so exposure acts like a camera aperture: higher =
+  // brighter reflections, lower = dimmer. Slider range covers
+  // typical HDR dynamic range without the user's eyes blowing out.
+  envmapExposure: number;
+  // Radians, rotates the sky around world-Y. Users drag the sun
+  // without re-downloading a different panorama.
+  envmapRotation: number;
+  // Poly Haven asset slug — see src/envmapList.ts. Stored verbatim
+  // so persistence survives CDN URL-path changes. Validated on load
+  // against the known-slug allow-list.
+  envmapSlug: string;
+  // Resolution tier for the downloaded HDRI. Higher = sharper
+  // reflections on crisp bright highlights (strip lights, sun disc)
+  // but multiplies the fetch size by 4× per step (1K ~ 2MB, 2K ~ 6MB,
+  // 4K ~ 25MB). See ENVMAP_SIZES in src/envmapList.ts.
+  envmapSize: EnvmapSize;
 };
 
 type Preset = {
@@ -256,6 +292,13 @@ export function initUi(
   onChange:         () => void,
   markSceneChanged: () => void = () => {},
   perf:             PerfBinding | null = null,
+  reloadEnvmap:     (slug: string) => void = () => {},
+  randomEnvmap:     () => void = () => {},
+  /** Called when the user toggles `envmapEnabled` from false → true.
+   *  Lets main.ts do a LAZY fetch of the HDRI when envmap was off at
+   *  boot (so we didn't download anything), avoiding the fallback
+   *  gradient rendering after the user opted back in. */
+  onEnvmapEnabled:  () => void = () => {},
 ): Pane {
   const pane = new Pane({ title: 'Spectral Dispersion', expanded: true });
 
@@ -393,6 +436,47 @@ export function initUi(
   syncShapeSliders();
   shapeBinding.on('change', () => { syncShapeSliders(); pane.refresh(); });
 
+  // HDR environment map controls (Phase C). Placed in its own folder so
+  // the reflection-source swap + HDRI picker aren't buried in the
+  // existing Misc wagon wheel.
+  const env = pane.addFolder({ title: 'Environment' });
+  const envmapEnabledBinding = env.addBinding(params, 'envmapEnabled', { label: 'Enabled' });
+  // Lazy-fetch the HDRI when envmap flips from false → true. Boots
+  // with envmapEnabled=false skip the initial download (main.ts
+  // optimisation) — this handler kicks off the fetch on opt-in so
+  // the user doesn't have to click a separate button to get the
+  // panorama they configured.
+  envmapEnabledBinding.on('change', (ev) => {
+    if (ev.value) onEnvmapEnabled();
+  });
+  const envmapSlugBinding = env.addBinding(params, 'envmapSlug', {
+    label: 'Panorama',
+    options: Object.fromEntries(ENVMAPS.map(e => [`${e.label} (${e.kind})`, e.slug])),
+  });
+  envmapSlugBinding.on('change', (ev) => { reloadEnvmap(ev.value); });
+  // Size selector: trade download latency for highlight sharpness.
+  // 2K default — sharp enough for diamond facets on retina screens
+  // without making the random-panorama button feel sluggish.
+  const envmapSizeBinding = env.addBinding(params, 'envmapSize', {
+    label: 'Size',
+    options: Object.fromEntries(ENVMAP_SIZES.map(s => [s.toUpperCase(), s])),
+  });
+  // Changing size forces a re-fetch of the current slug at the new
+  // resolution — envmap textures are immutable, so swap the whole
+  // thing rather than try to up/down-sample in-place.
+  envmapSizeBinding.on('change', () => { reloadEnvmap(params.envmapSlug); });
+  env.addButton({ title: 'Random panorama' }).on('click', () => { randomEnvmap(); });
+  const envmapExposureBinding = env.addBinding(params, 'envmapExposure', {
+    min: ENVMAP_EXPOSURE_MIN, max: ENVMAP_EXPOSURE_MAX, step: 0.01, label: 'Exposure',
+  });
+  const envmapRotationBinding = env.addBinding(params, 'envmapRotation', {
+    // Radians directly (-π..+π); label says "(rad)" so the user sees
+    // the unit. Step = 1° in radians for smooth drag resolution without
+    // Tweakpane rounding 0.1° to zero. Value flows unchanged through
+    // writeFrame into `frame.envmapRotation`.
+    min: ENVMAP_ROTATION_MIN, max: ENVMAP_ROTATION_MAX, step: Math.PI / 180, label: 'Rotation (rad)',
+  });
+
   const misc = pane.addFolder({ title: 'Misc' });
   misc.addBinding(params, 'refractionStrength', { min: 0, max: 1.0, step: 0.001, label: 'Refraction' });
   misc.addBinding(params, 'projection', {
@@ -491,13 +575,38 @@ export function initUi(
   // tweakpane's readonly graph bindings emit a `change` event on every poll —
   // a global `pane.on('change')` handler would call markSceneChanged 4 times
   // a second and visibly clobber the temporal accumulation on the cube.
-  const onUserChange = (ev: { last: boolean }) => {
+  // Tweakpane exposes `last: boolean` on both folder-level and
+  // per-binding change events, but the concrete type shapes differ
+  // (`{last}` for folders, `TpChangeEvent<T>` for bindings). Use a
+  // permissive structural shape so both subscription surfaces accept
+  // this callback — JS ignores the extra fields on bindings.
+  const onUserChange = (ev: { readonly last?: boolean }) => {
     if (ev.last) markSceneChanged();
     onChange();
   };
   spectral.on('change',  onUserChange);
   shape.on('change',     onUserChange);
   misc.on('change',      onUserChange);
+  // Environment folder is subscribed PER-BINDING rather than at folder
+  // level because slug/size changes must NOT persist until the async
+  // reloadEnvmap fetch succeeds — a folder-level subscription would
+  // commit a failed-fetch slug/size to localStorage before we know
+  // whether the new panorama loaded (Codex P2 regression flagged iter 2).
+  // Slug/size bindings have their own `.on('change')` handlers that
+  // delegate to reloadEnvmap → persist + markSceneChanged on success
+  // only. Exposure/rotation/enabled mutate params directly and DO need
+  // the change hook so a) config survives reload, b) TAA history
+  // doesn't ghost an old exposure into the next frame on a paused
+  // scene.
+  //
+  // Per-binding `.on('change')` fires for each committed user change
+  // (no intermediate/last distinction exists at the binding level —
+  // that's a folder-level aggregation), so we always want both
+  // markSceneChanged + onChange, no `last` gating needed.
+  const onBindingChange = () => { markSceneChanged(); onChange(); };
+  envmapEnabledBinding.on('change',  onBindingChange);
+  envmapExposureBinding.on('change', onBindingChange);
+  envmapRotationBinding.on('change', onBindingChange);
 
   return pane;
 }
@@ -533,6 +642,15 @@ export function defaultParams(): Params {
     diamondFacetColor: false,
     diamondTirDebug: false,
     diamondView: 'free',
+    envmapEnabled: true,
+    // Exposure = 0.25 keeps typical HDRI peaks (studio strip-lights at
+    // 50-200, sunny sky at 5-20) inside the [0, 2] display range without
+    // flattening the mid-tones. Users with brighter/dimmer HDRIs tune
+    // via the slider.
+    envmapExposure: 0.25,
+    envmapRotation: 0,
+    envmapSlug: DEFAULT_ENVMAP_SLUG,
+    envmapSize: DEFAULT_ENVMAP_SIZE,
   };
 }
 

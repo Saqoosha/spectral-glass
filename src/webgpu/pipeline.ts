@@ -1,5 +1,6 @@
 import type { GpuContext } from './device';
 import type { PhotoTex } from '../photo';
+import type { EnvmapTex } from '../envmap';
 import type { History } from './history';
 import type { Intermediate } from './postprocess';
 import vsSrc from '../shaders/fullscreen.wgsl?raw';
@@ -37,6 +38,7 @@ export async function createPipeline(
   ctx: GpuContext,
   frameBuf: GPUBuffer,
   photo: PhotoTex,
+  envmap: EnvmapTex,
   history: History,
 ): Promise<Pipeline> {
   const { device } = ctx;
@@ -95,6 +97,14 @@ export async function createPipeline(
       { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
       { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
       { binding: 4, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+      // 5/6: HDR environment map (Phase C). `rgba16float` supports
+      // `sampleType: 'float'` + `sampler: 'filtering'` by default under
+      // WebGPU core (no feature required). The contrast is rgba32float,
+      // which needs the `float32-filterable` feature for linear
+      // sampling — we deliberately chose 16f to avoid that adapter
+      // surface area and halve the memory footprint.
+      { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+      { binding: 6, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
     ],
   });
   const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
@@ -128,7 +138,7 @@ export async function createPipeline(
   return {
     bg,
     proxy,
-    bindGroups: buildBindGroups(ctx, bg, frameBuf, photo, history),
+    bindGroups: buildBindGroups(ctx, bg, frameBuf, photo, envmap, history),
   };
 }
 
@@ -137,6 +147,7 @@ function buildBindGroups(
   pipeline: GPURenderPipeline,
   frameBuf: GPUBuffer,
   photo: PhotoTex,
+  envmap: EnvmapTex,
   history: History,
 ): [GPUBindGroup, GPUBindGroup] {
   const layout = pipeline.getBindGroupLayout(0);
@@ -149,6 +160,8 @@ function buildBindGroups(
       { binding: 2, resource: photo.sampler },
       { binding: 3, resource: history.views[readIndex] },
       { binding: 4, resource: history.sampler },
+      { binding: 5, resource: envmap.texture.createView() },
+      { binding: 6, resource: envmap.sampler },
     ],
   });
   return [makeFor(0), makeFor(1)];
@@ -159,9 +172,10 @@ export function rebuildBindGroups(
   pl: Pipeline,
   frameBuf: GPUBuffer,
   photo: PhotoTex,
+  envmap: EnvmapTex,
   history: History,
 ): void {
-  pl.bindGroups = buildBindGroups(ctx, pl.bg, frameBuf, photo, history);
+  pl.bindGroups = buildBindGroups(ctx, pl.bg, frameBuf, photo, envmap, history);
 }
 
 /** Encode the scene pass (bg + proxy) into the given command encoder.

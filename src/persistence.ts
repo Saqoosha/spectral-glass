@@ -1,6 +1,8 @@
 import {
   DIAMOND_SIZE_MAX, DIAMOND_SIZE_MIN,
   EDGE_R_MAX, EDGE_R_MIN, FOV_MAX, FOV_MIN,
+  ENVMAP_EXPOSURE_MAX, ENVMAP_EXPOSURE_MIN,
+  ENVMAP_ROTATION_MAX, ENVMAP_ROTATION_MIN,
   HISTORY_ALPHA_MAX, HISTORY_ALPHA_MIN,
   PILL_LEN_MAX, PILL_LEN_MIN, PILL_SHORT_MAX, PILL_SHORT_MIN,
   PILL_THICK_MAX, PILL_THICK_MIN,
@@ -8,6 +10,7 @@ import {
   type AaMode, type DiamondView, type Params,
 } from './ui';
 import { DIAMOND_VIEW_VALUES } from './math/diamond';
+import { isKnownSlug, ENVMAP_SIZES, type EnvmapSize } from './envmapList';
 import type { Pill } from './pills';
 
 const KEY     = 'realrefraction:config';
@@ -98,6 +101,17 @@ function validateParams(u: unknown): Partial<Params> {
   if (typeof p.diamondTirDebug === 'boolean')   out.diamondTirDebug   = p.diamondTirDebug;
   if (typeof p.diamondView === 'string' && DIAMOND_VIEWS.has(p.diamondView as DiamondView)) {
     out.diamondView = p.diamondView as DiamondView;
+  }
+  // Envmap (Phase C). Slug is validated against the known Poly Haven
+  // allow-list so a hand-edited / stale entry doesn't trigger a 404
+  // on next startup.
+  if (typeof p.envmapEnabled === 'boolean')     out.envmapEnabled  = p.envmapEnabled;
+  if (isFiniteNumber(p.envmapExposure))         out.envmapExposure = clamp(p.envmapExposure, ENVMAP_EXPOSURE_MIN, ENVMAP_EXPOSURE_MAX);
+  if (isFiniteNumber(p.envmapRotation))         out.envmapRotation = clamp(p.envmapRotation, ENVMAP_ROTATION_MIN, ENVMAP_ROTATION_MAX);
+  if (typeof p.envmapSlug === 'string' && isKnownSlug(p.envmapSlug)) out.envmapSlug = p.envmapSlug;
+  if (typeof p.envmapSize === 'string'
+    && (ENVMAP_SIZES as readonly string[]).includes(p.envmapSize)) {
+    out.envmapSize = p.envmapSize as EnvmapSize;
   }
   return out;
 }

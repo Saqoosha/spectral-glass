@@ -59,6 +59,11 @@ function defaultParamsForSave(): Params {
     diamondFacetColor: false,
     diamondTirDebug: false,
     diamondView: 'free',
+    envmapEnabled: true,
+    envmapExposure: 0.25,
+    envmapRotation: 0,
+    envmapSlug: 'studio_small_03',
+    envmapSize: '2k',
   };
 }
 
@@ -151,6 +156,105 @@ describe('persistence — diamondFacetColor boolean guard', () => {
       const loaded = loadStored();
       expect(loaded?.params.diamondFacetColor).toBe(val);
     }
+  });
+});
+
+describe('persistence — envmap field validation (Phase C)', () => {
+  beforeEach(() => {
+    installStorage();
+  });
+
+  it('rejects unknown envmap slugs (allow-list gate vs stale localStorage)', () => {
+    // Matches the same "drop to default" pattern diamondView uses —
+    // a hand-edited or migration-stale slug should be dropped so the
+    // default kicks in, not trigger a 404 at boot.
+    const mem = installStorage();
+    writeRaw(mem, { envmapSlug: 'nonexistent_hdri' });
+    const loaded = loadStored();
+    expect(loaded?.params.envmapSlug).toBeUndefined();
+  });
+
+  it('accepts known envmap slugs', () => {
+    const mem = installStorage();
+    writeRaw(mem, { envmapSlug: 'studio_small_03' });
+    const loaded = loadStored();
+    expect(loaded?.params.envmapSlug).toBe('studio_small_03');
+  });
+
+  it('rejects unknown envmap sizes', () => {
+    const mem = installStorage();
+    writeRaw(mem, { envmapSize: '8k' });
+    const loaded = loadStored();
+    expect(loaded?.params.envmapSize).toBeUndefined();
+  });
+
+  it('clamps envmapExposure to [MIN, MAX]', () => {
+    // UI slider range is 0.01 .. 2.0 — hand-edited values outside
+    // that range should be pulled back in.
+    const mem = installStorage();
+    writeRaw(mem, { envmapExposure: 99 });
+    expect(loadStored()?.params.envmapExposure).toBe(2.0);
+    mem.clear();
+    writeRaw(mem, { envmapExposure: -5 });
+    expect(loadStored()?.params.envmapExposure).toBe(0.01);
+    mem.clear();
+    writeRaw(mem, { envmapExposure: 0.5 });
+    expect(loadStored()?.params.envmapExposure).toBe(0.5);
+  });
+
+  it('clamps envmapRotation to [-π, π]', () => {
+    const mem = installStorage();
+    writeRaw(mem, { envmapRotation: 100 });
+    expect(loadStored()?.params.envmapRotation).toBeCloseTo(Math.PI, 6);
+    mem.clear();
+    writeRaw(mem, { envmapRotation: -100 });
+    expect(loadStored()?.params.envmapRotation).toBeCloseTo(-Math.PI, 6);
+  });
+
+  it('rejects non-boolean envmapEnabled', () => {
+    const mem = installStorage();
+    for (const bogus of ['true', 1, null, {}, []]) {
+      mem.clear();
+      writeRaw(mem, { envmapEnabled: bogus as unknown });
+      expect(loadStored()?.params.envmapEnabled).toBeUndefined();
+    }
+  });
+
+  it('rejects non-string envmapSlug / envmapSize payloads', () => {
+    // Diamond view / facet color get their "non-string reject" test
+    // via the allow-list code path. Mirror it for envmap so the
+    // `typeof === 'string'` guard can't silently relax into a truthy
+    // check without this firing. Covers null (typeof 'object' trap),
+    // numbers, booleans, arrays, objects.
+    const mem = installStorage();
+    for (const bogus of [null, 123, true, ['2k'], { size: '2k' }]) {
+      mem.clear();
+      writeRaw(mem, { envmapSize: bogus as unknown });
+      expect(loadStored()?.params.envmapSize).toBeUndefined();
+      mem.clear();
+      writeRaw(mem, { envmapSlug: bogus as unknown });
+      expect(loadStored()?.params.envmapSlug).toBeUndefined();
+    }
+  });
+
+  it('round-trips every envmap field through save() + loadStored()', () => {
+    installStorage();
+    const params = defaultParamsForSave();
+    const patched = {
+      ...params,
+      envmapEnabled: false,
+      envmapExposure: 0.75,
+      envmapRotation: 1.23,
+      envmapSlug: 'neon_photostudio',
+      envmapSize: '4k' as const,
+    };
+    save(patched, []);
+    const loaded = loadStored();
+    expect(loaded?.params.envmapEnabled).toBe(false);
+    expect(loaded?.params.envmapExposure).toBeCloseTo(0.75, 6);
+    expect(loaded?.params.envmapRotation).toBeCloseTo(1.23, 6);
+    expect(loaded?.params.envmapSlug).toBe('neon_photostudio');
+    expect(loaded?.params.envmapSize).toBe('4k');
   });
 });
 

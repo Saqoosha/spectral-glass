@@ -18,6 +18,11 @@ const DIAMOND_ROT_FLOATS            = 12;
 // tirDebug), starting right after the plate params block (which itself
 // follows both diamond rotation blocks).
 const DIAMOND_PARAMS_FLOAT_OFFSET    = DIAMOND_ROT_PREV_FLOAT_OFFSET + 12 + 4; // + plateParams(4)
+// Envmap params block follows immediately after diamond params: 4 floats
+// (exposure, rotation, enabled, pad). Kept on a pixel of its own in tests
+// so the Phase C slot packing doesn't silently shift under a future
+// uniform reshuffle.
+const ENVMAP_PARAMS_FLOAT_OFFSET     = DIAMOND_PARAMS_FLOAT_OFFSET + 4;
 
 // Minimal device + buffer mocks. writeFrame calls queue.writeBuffer exactly
 // once per invocation; we capture the source Float32Array and the offset
@@ -70,6 +75,9 @@ function baseParams(overrides: Partial<FrameParams>): FrameParams {
     diamondFacetColor:  false,
     diamondTirDebug:    false,
     diamondView:        'free',
+    envmapEnabled:      false,
+    envmapExposure:     0.25,
+    envmapRotation:     0,
     pills:              [],
     ...overrides,
   };
@@ -185,6 +193,33 @@ describe('writeFrame — diamond rotation slot selection', () => {
     expect(scratch[DIAMOND_PARAMS_FLOAT_OFFSET + 1]).toBe(0);
     expect(scratch[DIAMOND_PARAMS_FLOAT_OFFSET + 2]).toBe(0);
     expect(scratch[DIAMOND_PARAMS_FLOAT_OFFSET + 3]).toBe(0);
+  });
+
+  it('writes envmap params into the correct slots (exposure/rotation/enabled)', () => {
+    // Envmap params block is [exposure, rotation, enabled, pad]. Pin
+    // each slot so a future 16B-block reshuffle doesn't cross-wire the
+    // exposure and rotation values (which would flip panorama brightness
+    // and aim in perfect opposite directions).
+    const { device, writes } = mockDevice();
+    const buf = {} as GPUBuffer;
+    writeFrame(device, buf, baseParams({
+      envmapEnabled: true,
+      envmapExposure: 0.37,
+      envmapRotation: 1.23,
+    }));
+    const scratch = writes[0]!.src;
+    expect(scratch[ENVMAP_PARAMS_FLOAT_OFFSET + 0]).toBeCloseTo(0.37, 6);
+    expect(scratch[ENVMAP_PARAMS_FLOAT_OFFSET + 1]).toBeCloseTo(1.23, 6);
+    expect(scratch[ENVMAP_PARAMS_FLOAT_OFFSET + 2]).toBe(1);
+    // Pad slot stays zero (scratch.fill(0)); if a future field lands
+    // there this test catches the collision.
+    expect(scratch[ENVMAP_PARAMS_FLOAT_OFFSET + 3]).toBe(0);
+
+    // envmapEnabled = false maps to 0 — the shader's `> 0.5` gate
+    // needs exact 0/1, so regression-pin the boolean conversion.
+    const off = mockDevice();
+    writeFrame(off.device, buf, baseParams({ envmapEnabled: false }));
+    expect(off.writes[0]!.src[ENVMAP_PARAMS_FLOAT_OFFSET + 2]).toBe(0);
   });
 
   it('writeFrame accepts every view in DIAMOND_VIEW_VALUES without throwing', () => {
