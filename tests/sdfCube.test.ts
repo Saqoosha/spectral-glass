@@ -3,6 +3,7 @@ import { sdfCube } from '../src/math/sdfCube';
 
 const HS  : [number, number, number] = [80, 80, 80];
 const EDGE = 8;
+const L4_VISUAL_RADIUS_SCALE = (1 - Math.SQRT1_2) / (1 - Math.SQRT1_2 ** 0.5);
 
 describe('sdfCube', () => {
   it('is negative at the interior origin', () => {
@@ -39,16 +40,17 @@ describe('sdfCube', () => {
   });
 
   it('eases curvature from flat faces into the rim', () => {
+    const r = EDGE * L4_VISUAL_RADIUS_SCALE;
     const q = 1;
-    const qx = Math.pow(EDGE ** 4 - q ** 4, 0.25);
-    const p: [number, number, number] = [HS[0] - EDGE + qx, HS[1] - EDGE + q, 0];
+    const qx = Math.pow(r ** 4 - q ** 4, 0.25);
+    const p: [number, number, number] = [HS[0] - r + qx, HS[1] - r + q, 0];
     expect(sdfCube(p, HS, EDGE)).toBeCloseTo(0, 5);
     expect(HS[0] - p[0]).toBeLessThan(0.001);
   });
 
-  it('can use the legacy circular L2 rim for comparison', () => {
+  it('compensates smooth L4 so its 45-degree inset matches the legacy L2 rim', () => {
     const q = EDGE / Math.SQRT2;
     expect(sdfCube([HS[0] - EDGE + q, HS[1] - EDGE + q, 0], HS, EDGE, false)).toBeCloseTo(0, 5);
-    expect(sdfCube([HS[0] - EDGE + q, HS[1] - EDGE + q, 0], HS, EDGE, true)).toBeLessThan(0);
+    expect(sdfCube([HS[0] - EDGE + q, HS[1] - EDGE + q, 0], HS, EDGE, true)).toBeCloseTo(0, 5);
   });
 });

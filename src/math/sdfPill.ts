@@ -1,5 +1,7 @@
 type Vec3 = readonly [number, number, number];
 
+const L4_VISUAL_RADIUS_SCALE = (1 - Math.SQRT1_2) / (1 - Math.SQRT1_2 ** 0.5);
+
 /**
  * 3D pill distance estimator. Two-stage construction (mirrored in
  * `dispersion.wgsl`):
@@ -25,7 +27,9 @@ function roundedLength2(x: number, y: number, smoothCurvature: boolean): number 
 
 export function sdfPill3d(p: Vec3, halfSize: Vec3, edgeR: number, smoothCurvature = true): number {
   const xyR = Math.min(edgeR, halfSize[0], halfSize[1]);
-  const zR  = Math.min(edgeR, halfSize[2]);
+  // XY must remain a true circular pill. Only the Z roundover gets the L4
+  // visual compensation so smooth/legacy modes look like the same radius.
+  const zR  = Math.min(edgeR * (smoothCurvature ? L4_VISUAL_RADIUS_SCALE : 1), halfSize[2]);
   const hsX = halfSize[0] - xyR;
   const hsY = halfSize[1] - xyR;
 

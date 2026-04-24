@@ -1,5 +1,7 @@
 type Vec3 = readonly [number, number, number];
 
+const L4_VISUAL_RADIUS_SCALE = (1 - Math.SQRT1_2) / (1 - Math.SQRT1_2 ** 0.5);
+
 /**
  * Rounded box (cuboid) distance estimator. The rim uses an L4
  * superellipsoid/squircle norm instead of a circular L2 fillet, so the
@@ -18,13 +20,19 @@ function superellipsoidLength3(x: number, y: number, z: number): number {
 }
 
 export function sdfCube(p: Vec3, halfSize: Vec3, edgeR: number, smoothCurvature = true): number {
-  const qx = Math.abs(p[0]) - halfSize[0] + edgeR;
-  const qy = Math.abs(p[1]) - halfSize[1] + edgeR;
-  const qz = Math.abs(p[2]) - halfSize[2] + edgeR;
+  // L4 corners cut much less than circular L2 corners at the same radius.
+  // Scale the smooth radius so the 45-degree cross-section matches L2's
+  // visible inset while keeping axis-aligned faces in the same place.
+  const r = smoothCurvature
+    ? Math.min(edgeR * L4_VISUAL_RADIUS_SCALE, halfSize[0], halfSize[1], halfSize[2])
+    : edgeR;
+  const qx = Math.abs(p[0]) - halfSize[0] + r;
+  const qy = Math.abs(p[1]) - halfSize[1] + r;
+  const qz = Math.abs(p[2]) - halfSize[2] + r;
   const ax = Math.max(qx, 0);
   const ay = Math.max(qy, 0);
   const az = Math.max(qz, 0);
   const rim = smoothCurvature ? superellipsoidLength3(ax, ay, az) : Math.hypot(ax, ay, az);
   return rim
-       + Math.min(Math.max(qx, qy, qz), 0) - edgeR;
+       + Math.min(Math.max(qx, qy, qz), 0) - r;
 }

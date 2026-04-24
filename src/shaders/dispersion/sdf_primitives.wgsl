@@ -1,5 +1,7 @@
 // ---------- SDF ----------
 
+const L4_VISUAL_RADIUS_SCALE: f32 = 1.84089642;
+
 fn superellipseLength2(v: vec2<f32>) -> f32 {
   let v2 = v * v;
   return sqrt(sqrt(dot(v2, v2)));
@@ -8,6 +10,13 @@ fn superellipseLength2(v: vec2<f32>) -> f32 {
 fn superellipsoidLength3(v: vec3<f32>) -> f32 {
   let v2 = v * v;
   return sqrt(sqrt(dot(v2, v2)));
+}
+
+fn visualRoundRadius(edgeR: f32, limit: f32) -> f32 {
+  if (frame.smoothCurvature > 0.5) {
+    return min(edgeR * L4_VISUAL_RADIUS_SCALE, limit);
+  }
+  return min(edgeR, limit);
 }
 
 fn roundedLength2(v: vec2<f32>) -> f32 {
@@ -26,7 +35,7 @@ fn roundedLength3(v: vec3<f32>) -> f32 {
 
 fn sdfPill(p: vec3<f32>, halfSize: vec3<f32>, edgeR: f32) -> f32 {
   let xyR  = min(edgeR, min(halfSize.x, halfSize.y));
-  let zR   = min(edgeR, halfSize.z);
+  let zR   = visualRoundRadius(edgeR, halfSize.z);
   let qXY  = abs(p.xy) - (halfSize.xy - vec2<f32>(xyR));
   // Keep the front silhouette a true circular capsule. Smooth curvature only
   // affects the Z roundover, so toggling it changes refraction joins without
@@ -52,12 +61,14 @@ fn sdfPillGrad(p: vec3<f32>, halfSize: vec3<f32>, edgeR: f32) -> vec3<f32> {
 // face-to-rim curvature eases in from zero instead of stepping from flat to
 // circular. Equal halfSize = cube.
 fn sdfCube(p: vec3<f32>, halfSize: vec3<f32>, edgeR: f32) -> f32 {
-  let q = abs(p) - halfSize + vec3<f32>(edgeR);
-  return roundedLength3(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0) - edgeR;
+  let r = visualRoundRadius(edgeR, min(halfSize.x, min(halfSize.y, halfSize.z)));
+  let q = abs(p) - halfSize + vec3<f32>(r);
+  return roundedLength3(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0) - r;
 }
 
 fn sdfCubeGrad(p: vec3<f32>, halfSize: vec3<f32>, edgeR: f32) -> vec3<f32> {
-  let q = abs(p) - halfSize + vec3<f32>(edgeR);
+  let r = visualRoundRadius(edgeR, min(halfSize.x, min(halfSize.y, halfSize.z)));
+  let q = abs(p) - halfSize + vec3<f32>(r);
   let a = max(q, vec3<f32>(0.0));
   let s = select(vec3<f32>(-1.0), vec3<f32>(1.0), p >= vec3<f32>(0.0));
   if (frame.smoothCurvature > 0.5) {

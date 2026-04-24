@@ -3,6 +3,7 @@ import { sdfPill3d } from '../src/math/sdfPill';
 
 const HS  : [number, number, number] = [160, 44, 20];
 const EDGE = 14;
+const L4_VISUAL_RADIUS_SCALE = (1 - Math.SQRT1_2) / (1 - Math.SQRT1_2 ** 0.5);
 
 describe('sdfPill3d', () => {
   it('returns a negative value inside the pill (at origin)', () => {
@@ -41,18 +42,20 @@ describe('sdfPill3d', () => {
   });
 
   it('eases the top face into the side rim with squircle curvature', () => {
+    const zR = Math.min(EDGE * L4_VISUAL_RADIUS_SCALE, HS[2]);
     const q = 1;
-    const zq = Math.pow(EDGE ** 4 - q ** 4, 0.25);
-    const p: [number, number, number] = [0, HS[1] - EDGE + q, HS[2] - EDGE + zq];
+    const zq = Math.pow(zR ** 4 - q ** 4, 0.25);
+    const p: [number, number, number] = [0, HS[1] - zR + q, HS[2] - zR + zq];
     expect(sdfPill3d(p, HS, EDGE)).toBeCloseTo(0, 5);
     expect(HS[2] - p[2]).toBeLessThan(0.001);
   });
 
-  it('can use the legacy circular L2 rim for comparison', () => {
+  it('compensates smooth L4 so its 45-degree Z roundover matches the legacy L2 rim', () => {
+    const hs: [number, number, number] = [160, 44, 80];
     const q = EDGE / Math.SQRT2;
-    const p: [number, number, number] = [0, HS[1] - EDGE + q, HS[2] - EDGE + q];
-    expect(sdfPill3d(p, HS, EDGE, false)).toBeCloseTo(0, 5);
-    expect(sdfPill3d(p, HS, EDGE, true)).toBeLessThan(0);
+    const p: [number, number, number] = [0, hs[1] - EDGE + q, hs[2] - EDGE + q];
+    expect(sdfPill3d(p, hs, EDGE, false)).toBeCloseTo(0, 5);
+    expect(sdfPill3d(p, hs, EDGE, true)).toBeCloseTo(0, 5);
   });
 
   it('becomes a true pill in XY when edgeR exceeds the short half-axis', () => {
