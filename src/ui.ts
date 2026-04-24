@@ -111,7 +111,7 @@ export type Params = {
   projection: 'ortho' | 'perspective';
   fov: number;  // full vertical field-of-view in degrees
   debugProxy: boolean;  // tint proxy fragments pink
-  smoothCurvature: boolean;  // pill/cube: true = L4 squircle rim, false = legacy circular rim
+  smoothCurvature: boolean;  // pill/cube/plate: true = L4 squircle rim, false = legacy circular rim
   aaMode: AaMode;
   paused: boolean;  // "Stop the world" — freeze rotation/wave while keeping AA converging
   historyAlpha: number;  // steady-state EMA blend weight (0..1). Lower = more motion blur, less noise; higher = sharper but noisier.

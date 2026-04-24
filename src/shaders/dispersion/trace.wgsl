@@ -345,7 +345,7 @@ fn hitPlatePillIdx(p: vec3<f32>) -> u32 {
 fn plateAnalyticExit(roWorld: vec3<f32>, rdWorld: vec3<f32>, pillIdx: u32) -> CubeExit {
   let pill = frame.pills[pillIdx];
   // Plate forces a square face (y ≡ x), so override halfSize.y from the slot
-  // that might still be carrying a pill/cube value.
+  // that might still be carrying a pill/cube/plate preset value.
   let h = vec3<f32>(pill.halfSize.x, pill.halfSize.x, pill.halfSize.z);
 
   let roL = frame.plateRot * (roWorld - pill.center);

@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { plateRotationColumns } from '../src/math/plate';
+
+const here = dirname(fileURLToPath(import.meta.url));
 
 // Mirrors tests/cube.test.ts. Plate uses the same WGSL mat3x3<f32> layout as
 // cube — column k at indices [k*4, k*4+3) with `k*4+3` as the stride pad —
@@ -93,5 +98,17 @@ describe('plateRotationColumns', () => {
     expect(() => plateRotationColumns(NaN)).toThrow(/finite/);
     expect(() => plateRotationColumns(Infinity)).toThrow(/finite/);
     expect(() => plateRotationColumns(-Infinity)).toThrow(/finite/);
+  });
+});
+
+describe('sdfWavyPlate shader rim', () => {
+  it('uses the shared smooth-curvature rounded box rim', () => {
+    const wgsl = readFileSync(resolve(here, '../src/shaders/dispersion/sdf_primitives.wgsl'), 'utf8');
+    const match = /fn sdfWavyPlate[\s\S]*?return box \* frame\.waveLipFactor;\n\}/.exec(wgsl);
+    expect(match).not.toBeNull();
+    const body = match?.[0] ?? '';
+    expect(body).toContain('visualRoundRadius(edgeR');
+    expect(body).toContain('roundedLength3(max(q');
+    expect(body).not.toContain('let box    = length(max(q');
   });
 });

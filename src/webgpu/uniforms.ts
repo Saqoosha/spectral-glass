@@ -22,7 +22,7 @@ export type FrameParams = {
   readonly cameraZ:            number;  // distance from screen plane (z=0) to the camera, in pixels
   readonly projection:         number;  // 0 = orthographic, 1 = perspective
   readonly debugProxy:         boolean; // tint proxy fragments pink for debugging
-  readonly smoothCurvature:    boolean; // pill/cube: true = L4 squircle rim, false = legacy circular rim.
+  readonly smoothCurvature:    boolean; // pill/cube/plate: true = L4 squircle rim, false = legacy circular rim.
   readonly taaEnabled:         boolean; // jitter ray origin per frame so history EMA antialiases shader-decided silhouettes
   readonly sceneTime:          number;  // time value driving rotation + wave phase. Freezes on "Stop the world" while `time` above keeps advancing so AA continues to converge.
   readonly prevSceneTime:      number;  // sceneTime of the previous frame — drives motion-vector reprojection so history follows rotating shapes

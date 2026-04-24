@@ -125,7 +125,7 @@ struct Frame {
   envmapExposure:     f32,
   envmapRotation:     f32,
   envmapEnabled:      f32,
-  smoothCurvature:    f32,  // 1 = L4 squircle rim on pill/cube, 0 = legacy circular rim
+  smoothCurvature:    f32,  // 1 = L4 squircle rim on pill/cube/plate, 0 = legacy circular rim
   pills:              array<PillGpu, MAX_PILLS>,
 };
 

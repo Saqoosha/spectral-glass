@@ -176,9 +176,14 @@ fn sdfWavyPlate(pIn: vec3<f32>, halfSize: vec3<f32>, edgeR: f32) -> f32 {
   // gradient across the corner, which removes the dominant source of the
   // "speckle along plate edge" artifact at its origin instead of relying
   // on `plateCreaseAt` to detect-and-divert it.
+  //
+  // Use the same smooth-curvature switch and visual radius compensation as
+  // sdfCube so the plate's rim can be compared against the legacy circular
+  // fillet without changing the slider value.
   let pShift = vec3<f32>(p.x, p.y, p.z - waveZ);
-  let q      = abs(pShift) - h + vec3<f32>(edgeR);
-  let box    = length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0) - edgeR;
+  let r      = visualRoundRadius(edgeR, min(h.x, min(h.y, h.z)));
+  let q      = abs(pShift) - h + vec3<f32>(r);
+  let box    = roundedLength3(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0) - r;
 
   return box * frame.waveLipFactor;
 }
