@@ -1,3 +1,5 @@
+**English** · [日本語](./ARCHITECTURE.ja.md)
+
 # Architecture
 
 Two-pass WebGPU renderer. Per-pixel SDF sphere-tracing inside a per-pill 3D

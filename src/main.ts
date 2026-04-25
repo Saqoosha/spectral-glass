@@ -433,7 +433,13 @@ async function main(): Promise<void> {
   const onKeyDown = (e: KeyboardEvent) => {
     if (isTypingTarget(e.target)) return;
     const k = e.key.toLowerCase();
-    if (k === 'z') forceN3 = true;
+    if (k === 'z' && !forceN3) {
+      forceN3 = true;
+      // Press: jitter just got pinned and N just dropped to 3 — both
+      // change the steady-state image, so reset history so the previous
+      // jittered+higher-N frame doesn't ghost into the A/B comparison.
+      markSceneChanged();
+    }
     if (e.key === ' ') {
       e.preventDefault();
       detach();
@@ -474,7 +480,11 @@ async function main(): Promise<void> {
     }
   };
   const onKeyUp = (e: KeyboardEvent) => {
-    if (e.key.toLowerCase() === 'z') forceN3 = false;
+    if (e.key.toLowerCase() === 'z' && forceN3) {
+      forceN3 = false;
+      // Release: same reason as press — back to jittered + configured N.
+      markSceneChanged();
+    }
   };
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup',   onKeyUp);
@@ -661,7 +671,13 @@ async function main(): Promise<void> {
       if (!params.paused) { sceneTime = (sceneTime + dt) % 1e4; }
 
       const N = forceN3 ? 3 : params.sampleCount;
-      const spectralSampling = spectralSamplingFields(params.temporalJitter, N);
+      // Z-key A/B forces both `N = 3` AND temporal jitter off so the
+      // 3-band RGB structure is actually visible — leaving jitter on
+      // would smooth the bands back into a continuous spectrum (which is
+      // exactly what spectralSampling exists to make A/B-able), defeating
+      // the comparison the hotkey is meant to show.
+      const jitterOn = params.temporalJitter && !forceN3;
+      const spectralSampling = spectralSamplingFields(jitterOn, N);
       // cameraZ sets the ortho depth AND implicitly the perspective FOV — for
       // a full FOV of `fov` degrees to fit the canvas height, the camera must
       // sit at `cameraZForFov(fov, height)` pixels above the z=0 plane.

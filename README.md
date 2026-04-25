@@ -1,3 +1,5 @@
+**English** · [日本語](./README.ja.md)
+
 # Spectral Glass
 
 > **Live demo**: <https://saqoosha.github.io/Spectral-Glass/> (WebGPU: Chrome/Edge 120+ or Safari 18+. HTML-in-canvas background: Chrome with the `CanvasDrawElement` flag; otherwise the app falls back to Picsum-only.)
@@ -10,18 +12,18 @@ tumbling wavy plates, and round brilliant cut diamonds. Unlike the common
 per-wavelength and reconstructs the final color via CIE 1931 color matching
 functions.
 
-![Four glass cubes refracting the README page on a grayscale photo](docs/images/demo-default.png)
+![Four glass cubes refracting the README page over a Picsum sunset photo](docs/images/demo-default.png)
 
 Above: the default opening scene: four rotating glass cubes (`n_d = 1.272`,
 `V_d = 2.0`, refraction strength `0.15`, perspective FOV 45°, N = 16) over a
 composite background — this README page (live HTML, via Chrome's
-`CanvasDrawElement` trial) layered on top of a grayscale Picsum photo when the
-browser supports HTML-in-canvas, or the same Picsum photo by itself when it
-does not.
-A monochrome background lets you see the per-wavelength dispersion as pure
-spectral colors instead of mixing with the photo's own chroma — every bright
-edge of every cube is the shader splitting the composite by wavelength in
-real time at 60 fps.
+`CanvasDrawElement` trial) layered on top of a Picsum photo when the browser
+supports HTML-in-canvas, or the same Picsum photo by itself when it does not.
+The bright spectral fringes along every cube edge are the shader splitting
+the composite background by wavelength in real time at 60 fps; on busier,
+high-chroma photos like the sunset above the dispersion mixes with the
+photo's own colour, and on a flatter / monochrome Picsum draw the per-
+wavelength split reads as a pure rainbow instead.
 
 ## Why not just shift R/G/B?
 
@@ -38,11 +40,13 @@ fully on (stratified jitter + CIE reconstruction + EMA history). Same rotating
 glass cube (`n_d = 1.7`, `V_d = 4`), same grayscale background photo, same
 frame — only the per-wavelength sample count and the smoothing pipeline differ.
 
-In the live demo, press and hold **`Z`** to force `N = 3`. Release to go back to
-the configured sample count (the default opening scene is `N = 16`). With
-jitter + history on, even `N = 3` looks close to `N = 8` at
-typical dispersion strengths — the 3-band rainbow only shows up cleanly when
-both are off (which is what the image above captures for illustration).
+In the live demo, press and hold **`Z`** to force `N = 3` AND pin temporal
+jitter off — the 3-band RGB structure only shows up when both are flipped, so
+the hotkey toggles them together. Release to restore the configured sample
+count (the default opening scene is `N = 16`) and the jitter setting from
+Tweakpane. With jitter on, even `N = 3` looks close to `N = 8` at typical
+dispersion strengths because the per-pixel hash and EMA history smooth the
+bands back into a continuous rainbow.
 
 ## Quick start
 
@@ -63,8 +67,8 @@ Background control to **Picsum only**.
 | Input | Action |
 |---|---|
 | Drag a shape | Move it around the canvas (cube / diamond use a circular hit radius) |
-| **`Z`** (hold) | Force `N = 3` (fake RGB dispersion) for A/B comparison |
-| **Space** | Shuffle pills to random positions |
+| **`Z`** (hold) | Force `N = 3` AND pin temporal jitter off so the 3-band RGB structure is actually visible (release to restore both) |
+| **Space** | Shuffle the active shape's instances to random positions (4 for pill / prism / cube / plate, 1 for diamond) |
 | **`R`** | Load a new random Picsum photo (same as **Random photo**; only when **HDR env** is off) |
 | **`T` / `S` / `B` / `F`** | Diamond view presets — **T**op (table toward camera) / **S**ide (girdle profile) / **B**ottom (culet toward camera) / **F**ree (tumble). No-op for other shapes. |
 | Tweakpane | IOR, Abbe, sample count, shape (pill / prism / cube / plate / diamond), dimensions, wave amp + wavelength (plate only), **diamond size** + view preset + **Wireframe** / **Facet color** + **TIR debug** (pink = bounce budget exhausted with refract still TIR; orange = analytic exit miss) + **TIR max bounces** 1…32 (default 6, higher = more work on TIR pixels) (diamond only), refraction strength, projection (ortho / perspective), FOV, temporal jitter, refraction mode, **Stop the world** (freeze rotation/wave while AA keeps converging), **AA** mode selector — `None` / `FXAA` (single-frame spatial filter) / `TAA` (sub-pixel jitter + motion-vector history reprojection), **Environment** — **HDR env** on: Poly Haven panorama (1K/2K/4K) + exposure + rotation + random; **off**: those hidden + **Random photo** (Picsum background; legacy reflSrc path for reflections). In Chrome with HTML-in-canvas, **Background** switches between **Picsum only** and **Picsum + text (HTML)**. |
