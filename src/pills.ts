@@ -11,9 +11,12 @@ export type Pill = {
 export const DEFAULT_PILL_COUNT = 4;
 
 /**
- * Old localStorage could persist too few drag targets; the renderer supports
- * up to `MAX_PILLS` instances. Pad with `defaultPills` layout slots so
- * non-diamond scenes keep their intended multi-object layout.
+ * Pad `pills` with `defaultPills` layout slots until it has at least
+ * `minCount` entries, capping the total at `PILL_COUNT_CAP` (the renderer's
+ * `MAX_PILLS` UBO array size). The default `minCount` matches the four-
+ * instance opening layout; callers pass a smaller value (e.g. 1 for the
+ * diamond preset) when the scene wants fewer instances. Pulled-from-defaults
+ * entries are shallow-cloned so the layout template stays immutable.
  */
 export function ensurePillInstanceCount(
   pills: readonly Pill[],
@@ -34,13 +37,22 @@ export function ensurePillInstanceCount(
   return copy;
 }
 
+/**
+ * Trim or pad `pills` to exactly `count` instances (clamped to
+ * `[1, PILL_COUNT_CAP]`; non-finite / fractional inputs floor to 1).
+ * Trimming preserves the leading entries' positions; padding pulls from
+ * `defaultPills(width, height)` and shallow-clones so the template stays
+ * immutable. Used by shape/preset switches in main.ts where the scene wants
+ * an exact instance count, not a floor.
+ */
 export function setPillInstanceCount(
   pills: readonly Pill[],
   width: number,
   height: number,
   count: number,
 ): Pill[] {
-  const target = Math.min(Math.max(1, Math.floor(count)), PILL_COUNT_CAP);
+  const safeCount = Number.isFinite(count) ? Math.floor(count) : 1;
+  const target = Math.min(Math.max(1, safeCount), PILL_COUNT_CAP);
   const copy = pills.slice(0, target).map((p) => ({ ...p }));
   if (copy.length >= target) {
     return copy;

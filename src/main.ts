@@ -137,6 +137,12 @@ async function main(): Promise<void> {
   const pillCountBeforeEnsure = pills.length;
   const targetPillCountForShape = (shape: Params['shape']): number =>
     shape === 'diamond' ? 1 : DEFAULT_PILL_COUNT;
+  // Two-step boot reconciliation: `ensurePillInstanceCount` enforces the
+  // FLOOR (so we never start with a lone pill from old localStorage), then
+  // `setPillInstanceCount` enforces the EXACT shape-driven count (1 for
+  // diamond, 4 for the rest). Composing the two keeps the persistence
+  // path's "don't lose user state" semantics while still letting the
+  // diamond preset open with a single instance.
   pills = setPillInstanceCount(
     ensurePillInstanceCount(pills, initSize.width, initSize.height, targetPillCountForShape(params.shape)),
     initSize.width,
@@ -334,17 +340,7 @@ async function main(): Promise<void> {
       // closure and flips on the first successful fetch.
       if (!envmapRealLoaded) void reloadEnvmap(params.envmapSlug);
     },
-    htmlInCanvasReady
-      ? {
-        supported: true,
-        focusEditor: () => {
-          if (!(htmlBgForeground instanceof HTMLElement)) return;
-          htmlBgForeground.classList.add('html-bg--editing');
-          htmlBgForeground.tabIndex = 0;
-          htmlBgForeground.focus();
-        },
-      }
-      : null,
+    htmlInCanvasReady ? { supported: true } : null,
     setScenePillCount,
   );
   paneRef = pane;
@@ -377,10 +373,6 @@ async function main(): Promise<void> {
     ctx.canvas.addEventListener('paint', onPaint);
     if (htmlBgForeground instanceof HTMLElement) {
       htmlBgForeground.addEventListener('input', () => { ctx.canvas.requestPaint?.(); });
-      htmlBgForeground.addEventListener('blur', () => {
-        htmlBgForeground.classList.remove('html-bg--editing');
-        htmlBgForeground.tabIndex = -1;
-      });
     }
     new ResizeObserver(() => {
       if (params.bgSource === 'html') ctx.canvas.requestPaint?.();
@@ -447,6 +439,9 @@ async function main(): Promise<void> {
       e.preventDefault();
       detach();
       const cur = resizeCanvas(ctx.canvas, ctx.dpr);
+      // Shuffle just the visible count — diamond stays single-instance even
+      // after Space, otherwise the preset's 1-instance rule would drift on
+      // the first random shuffle.
       pills = defaultPills(cur.width, cur.height).slice(0, targetPillCountForShape(params.shape)).map((p) => ({
         ...p,
         cx: Math.random() * cur.width,
@@ -457,7 +452,7 @@ async function main(): Promise<void> {
       persist();
     }
     if (k === 'r' && !params.envmapEnabled) {
-      void reloadPhoto(); /* markSceneChanged on success — same as Reload photo (hidden when HDR env on) */
+      void reloadPhoto(); /* markSceneChanged on success — same as the Random photo button (hidden when HDR env on) */
     }
     if (k === 'h') {
       const panes = document.querySelectorAll<HTMLElement>('.tp-dfwv');

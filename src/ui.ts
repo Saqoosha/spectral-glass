@@ -3,7 +3,13 @@ import type { PerfStats } from './perfStats';
 import { DIAMOND_SIZE_MIN, DIAMOND_SIZE_MAX, type DiamondView } from './math/diamond';
 import { ENVMAPS, DEFAULT_ENVMAP_SLUG, DEFAULT_ENVMAP_SIZE, ENVMAP_SIZES, type EnvmapSize } from './envmapList';
 import { defaultShapesParams, mergePrismDims, type ShapesParams } from './shapeParams';
+import { DEFAULT_PILL_COUNT } from './pills';
 export type { ShapesParams, CommonBodyParams, PlateShapeParams, DiamondShapeParams, PrismBodyParams } from './shapeParams';
+
+/** Diamond preset and shape-switch enforce a single instance — see
+ *  `setScenePillCount` in main.ts. Hoisted so `pillCountForShape` and the
+ *  Preset table read from one place instead of repeating the literal. */
+export const DIAMOND_PILL_COUNT = 1;
 
 /** Bounds for the envmap exposure slider. Exposed so `persistence.ts`
  *  clamps hand-edited / stale localStorage to the exact same range —
@@ -229,7 +235,7 @@ const MATERIALS: readonly Material[] = [
 const PRESETS: readonly Preset[] = [
   {
     label: 'Subtle pill',
-    pillCount: 4,
+    pillCount: DEFAULT_PILL_COUNT,
     apply: (p) => {
       p.shape              = 'pill';
       p.sampleCount        = 8;
@@ -254,7 +260,7 @@ const PRESETS: readonly Preset[] = [
   },
   {
     label: 'Prism rainbow',
-    pillCount: 4,
+    pillCount: DEFAULT_PILL_COUNT,
     apply: (p) => {
       p.shape              = 'prism';
       p.sampleCount        = 16;
@@ -276,7 +282,7 @@ const PRESETS: readonly Preset[] = [
   },
   {
     label: 'Rotating cube',
-    pillCount: 4,
+    pillCount: DEFAULT_PILL_COUNT,
     apply: (p) => {
       p.shape              = 'cube';
       p.sampleCount        = 16;
@@ -298,7 +304,7 @@ const PRESETS: readonly Preset[] = [
   },
   {
     label: 'Wavy plate',
-    pillCount: 4,
+    pillCount: DEFAULT_PILL_COUNT,
     apply: (p) => {
       p.shape              = 'plate';
       p.sampleCount        = 16;
@@ -323,7 +329,7 @@ const PRESETS: readonly Preset[] = [
   },
   {
     label: 'Diamond',
-    pillCount: 1,
+    pillCount: DIAMOND_PILL_COUNT,
     apply: (p) => {
       p.shape              = 'diamond';
       p.sampleCount        = 16;
@@ -377,8 +383,9 @@ export function initUi(
    *  boot (so we didn't download anything), avoiding the fallback
    *  gradient rendering after the user opted back in. */
   onEnvmapEnabled:  () => void = () => {},
-  /** When set, shows Background controls for HTML-in-Canvas. */
-  htmlBackground:   { supported: true; focusEditor: () => void } | null = null,
+  /** Truthy when the runtime supports HTML-in-Canvas; gates the Background
+   *  dropdown and the bgSource clamp inside preset clicks. */
+  htmlBackground:   { supported: true } | null = null,
   syncPillCount: (count: number) => void = () => {},
 ): Pane {
   const pane = new Pane({ title: 'Spectral Dispersion', expanded: true });
@@ -478,7 +485,9 @@ export function initUi(
     }
   }
   syncShapeSliders();
-  const pillCountForShape = (shapeName: Params['shape']): number => shapeName === 'diamond' ? 1 : 4;
+  // Mirrors `targetPillCountForShape` in main.ts — keep them in sync.
+  const pillCountForShape = (shapeName: Params['shape']): number =>
+    shapeName === 'diamond' ? DIAMOND_PILL_COUNT : DEFAULT_PILL_COUNT;
   shapeBinding.on('change', () => {
     syncShapeSliders();
     syncPillCount(pillCountForShape(params.shape));
@@ -578,6 +587,13 @@ export function initUi(
     const btn = presets.addButton({ title: preset.label });
     btn.on('click', () => {
       preset.apply(params);
+      // Presets are written context-free (Diamond unconditionally requests
+      // `bgSource: 'html'`); clamp here so a runtime click in a browser
+      // without HTML-in-Canvas support can't persist an unreachable state.
+      // Mirrors the boot-time guard in main.ts.
+      if (!htmlBackground && params.bgSource === 'html') {
+        params.bgSource = 'photo';
+      }
       syncPillCount(preset.pillCount);
       // Presets can switch shape AND change pill dims, so re-evaluate which
       // sliders are visible and reseed cubeSize before the refresh paints.

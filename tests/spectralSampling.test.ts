@@ -24,4 +24,22 @@ describe('spectralSamplingFields', () => {
     expect(fields.heroLambda).toBeCloseTo(380 + 0.75 * 320);
     expect(i).toBe(2);
   });
+
+  it('pins hero wavelength to the visible-spectrum endpoints when rand returns 0 or 1', () => {
+    const lo = spectralSamplingFields(true, 8, () => 0);
+    expect(lo.heroLambda).toBe(380);
+    const draws = [0, 1];
+    let i = 0;
+    const hi = spectralSamplingFields(true, 8, () => draws[i++] ?? 0);
+    expect(hi.heroLambda).toBe(700);
+  });
+
+  it('falls back to n=1 when sampleCount is non-finite or below 1 so no NaN reaches the UBO', () => {
+    const cases: number[] = [0, -3, 0.5, NaN, Number.POSITIVE_INFINITY];
+    for (const sampleCount of cases) {
+      const fields = spectralSamplingFields(true, sampleCount, () => 0.4);
+      expect(Number.isFinite(fields.wavelengthJitter)).toBe(true);
+      expect(fields.wavelengthJitter).toBeCloseTo(0.4);
+    }
+  });
 });

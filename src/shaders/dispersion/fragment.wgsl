@@ -73,6 +73,11 @@ fn proxyBgOut(uv: vec2<f32>, bg: vec3<f32>) -> FsOut {
   return out;
 }
 
+// Per-stratum spatial/temporal noise for the wavelength loop. The host writes
+// `frame.jitter` to the `SPECTRAL_JITTER_DISABLED` sentinel (-1; defined in
+// `src/spectralSampling.ts`) when **Temporal jitter** is off — we treat any
+// negative value as the off signal and return 0 so every pixel samples the
+// stratum centre, making the toggle visibly stop fizzling at high `sampleCount`.
 fn spectralStratumJitter(px: vec2<f32>, jitter: f32) -> f32 {
   if (jitter < 0.0) {
     return 0.0;
@@ -340,6 +345,11 @@ fn fs_main(in: ProxyFsIn) -> FsOut {
   // N=3 about a third of pixels lose their red-end sample (CMF≈0 at 720-753
   // nm), rgbWeight.b drops to zero there, and the renormaliser flips a white
   // background pixel to yellow.
+  //
+  // When **Temporal jitter** is off the host writes `SPECTRAL_JITTER_DISABLED`
+  // (-1) and `spectralStratumJitter` returns 0, so `t` lands at every stratum's
+  // exact centre — the on/off difference becomes visible instead of being
+  // washed out by per-pixel hash.
   let pxJit = spectralStratumJitter(px, jitter);
 
   // For each wavelength λ:

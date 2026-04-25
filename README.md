@@ -82,7 +82,10 @@ Preset values are intentionally opinionated snapshots:
 | Diamond | 1 | `N=16`, `n_d=2.418`, `V_d=55`, refraction `0.200`, size `400`, free tumble, TIR bounces `6`, Brown Studio 2 `2K`, exposure `0.75`, rotation `-1.0995` |
 
 All presets use perspective FOV 45°, Exact refraction, temporal jitter on,
-AA `None`, and history alpha `0.5`.
+AA `None`, history alpha `0.5`, and clear `paused` / `debugProxy`. Non-diamond
+presets disable HDR env (so the spectral split lands on the photo); the Diamond
+preset turns it on with the Brown Studio 2 panorama configured in the table
+above.
 
 The **Perf** panel shows **GPU ms** by default when the browser exposes WebGPU
 `timestamp-query` (if the adapter does not, the GPU line stays empty — that is
@@ -174,8 +177,9 @@ in the UI to tint every proxy fragment pink and see the rasterised silhouette.
   or repeated copies fail, the app falls back to **Picsum only** while staying
   scrollable and interactive.
 - **Temporal accumulation.** `rgba16float` ping-pong history with EMA blend
-  (α = 0.2 steady-state, 1.0 for one frame after a scene change so cube
-  tail doesn't ghost in). When **Stop the world** freezes the scene, the
+  (α defaults to 0.5 in steady state — user-tunable via the **History α**
+  slider — and 1.0 for one frame after a scene change so cube tail doesn't
+  ghost in). When **Stop the world** freezes the scene, the
   blend switches to progressive averaging α = max(1/n, 1/256) — noise
   drops as 1/√n in the convergence ramp and bottoms out at a 256-sample
   sliding window (~6 % residual). The 1/256 floor is required by fp16

@@ -41,12 +41,34 @@ describe('setPillInstanceCount', () => {
     expect(out[0]).not.toBe(d[0]);
   });
 
-  it('pads back to four pills for multi-object presets', () => {
+  it('pads back to four pills for multi-object presets and clones defaults', () => {
     const one = [{ cx: 100, cy: 200, cz: 0, hx: 1, hy: 1, hz: 1, edgeR: 5 }];
     const out = setPillInstanceCount(one, 800, 600, DEFAULT_PILL_COUNT);
     expect(out).toHaveLength(DEFAULT_PILL_COUNT);
     expect(out[0]).toEqual(one[0]);
-    expect(out[1]?.cx).toBe(defaultPills(800, 600)[1]!.cx);
+    const baseline = defaultPills(800, 600);
+    expect(out[1]?.cx).toBe(baseline[1]!.cx);
+    // Mutating the padded entry must NOT bleed back into a fresh defaultPills layout.
+    out[1]!.cx = -999;
+    expect(defaultPills(800, 600)[1]!.cx).toBe(baseline[1]!.cx);
+  });
+
+  it('clamps non-positive, fractional, oversized, and non-finite counts into [1, MAX_PILLS]', () => {
+    const d = defaultPills(800, 600);
+    expect(setPillInstanceCount(d, 800, 600, 0)).toHaveLength(1);
+    expect(setPillInstanceCount(d, 800, 600, -3)).toHaveLength(1);
+    expect(setPillInstanceCount(d, 800, 600, 4.7)).toHaveLength(4);
+    expect(setPillInstanceCount(d, 800, 600, 99)).toHaveLength(d.length);
+    expect(setPillInstanceCount(d, 800, 600, Number.NaN)).toHaveLength(1);
+  });
+});
+
+describe('ensurePillInstanceCount overflow', () => {
+  it('truncates to MAX_PILLS when given more than the renderer can address', () => {
+    const seed = { cx: 0, cy: 0, cz: 0, hx: 1, hy: 1, hz: 1, edgeR: 0 };
+    const oversized = Array.from({ length: 20 }, () => ({ ...seed }));
+    const out = ensurePillInstanceCount(oversized, 800, 600);
+    expect(out).toHaveLength(8);
   });
 });
 

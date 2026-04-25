@@ -16,7 +16,7 @@ shape/preset. See `README.md` and `docs/ARCHITECTURE.md`.
 - New SDF `sdfDiamond` with Full 58-facet round brilliant geometry (table + 8 bezel + 8 star + 16 upper half + 16 lower half + 8 pavilion main + pointed culet)
 - Fixed Tolkowsky proportions; one user slider `diamondSize` (girdle diameter)
 - Y-axis auto-rotation with 20° forward tilt (jewelry display stand pose)
-- Draggable XY position (reuses existing pills drag UX), multi-instance up to `MAX_PILLS=8`
+- Draggable XY position (reuses existing pills drag UX). Phase A allowed multi-instance up to `MAX_PILLS=8`; the production app now constrains diamond to **one instance** (presets and shape switches enforce this — see `setScenePillCount` in `main.ts`).
 - Trace: existing `sphereTrace` (entry) + `insideTrace` (exit). No TIR.
 
 **Phase B (separate spec later)**
@@ -193,7 +193,7 @@ HEAD (80) | cubeRot (48) | cubeRotPrev (48) | plateRot (48) | plateRotPrev (48)
 1. **Silhouette**: at `diamondSize` 100 / 200 / 400 the shape reads as a brilliant cut — octagonal table visible from above, crown + pavilion split visible from tilted angle (which the 20° fixed tilt guarantees).
 2. **Rotation smoothness + TAA**: Y-axis spin with no history smearing — `reprojectHit` for shape 4 reads the right prev-rotation pixel.
 3. **Drag**: click-and-drag moves the diamond; release persists.
-4. **Multi-instance**: two diamonds render independently, both rotate in sync (shared `diamondRot`), both draggable.
+4. **Multi-instance** (historical Phase A criterion): two diamonds render independently, both rotate in sync (shared `diamondRot`), both draggable. _Production now caps diamond at 1 instance — see status banner above._
 5. **Persistence**: reload preserves `diamondSize` and instance positions.
 6. **Non-regression**: pill/prism/cube/plate visuals and drag behavior unchanged.
 7. **Unit tests**: `tests/diamond.test.ts` + updated `tests/uniformsLayout.test.ts` pass.

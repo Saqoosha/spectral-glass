@@ -177,9 +177,11 @@ Uniform size is fixed — pills beyond `pillCount` are zeros.
   derivation in `src/webgpu/uniforms.ts`. Defaults give ≈ 0.92 vs the
   older hardcoded 0.6 — ~53 % more progress per step at the same safety
   margin.
-- `historyBlend` is 0.2 in steady state and 1.0 for one frame after a scene
-  change (preset click, photo reload, shape switch, pill shuffle, pause
-  toggle) so stale temporal history doesn't ghost in. Switches to
+- `historyBlend` defaults to the **History α** slider (currently `0.5` in
+  `defaultParams()` and every preset; user-tunable in the Misc folder) for
+  steady state, and 1.0 for one frame after a scene change (preset click,
+  photo reload, shape switch, pill shuffle, pause toggle) so stale temporal
+  history doesn't ghost in. Switches to
   progressive averaging `α = max(1/n, 1/256)` while "Stop the world" is
   on — noise drops as 1/√n in the convergence ramp and bottoms out at a
   256-sample sliding window (~6 % residual). The 1/256 floor is required
